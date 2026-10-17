@@ -1,0 +1,6 @@
+# Personal data: the question bank, modules and results, and imported question sets.
+data/
+imports/
+*.jsonl
+_test/
+__pycache__/
