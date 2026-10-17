@@ -113,8 +113,7 @@ const S = {
   form: { mode: 'test', count: null, minutes: null, timed: true, shuffle: false },
   cur: null, elim: false, nav: false, clockHidden: false, ref: false,
   rev: null,
-  todayN: (() => { try { return +localStorage.getItem('mb-today-n') || 10; } catch { return 10; } })(),
-  plan: null, anotherSet: false, mistakeFilter: '', showCleared: false, skillSel: null, skillsOpen: false,
+  mistakeFilter: '', showCleared: false, skillSel: null, skillsOpen: false,
 };
 
 // ---------- PDF import ----------
@@ -542,41 +541,12 @@ const REASONS = {
   slip: 'Careless slip',
 };
 
-// ---------- today's set ----------
-// The set is built the same way all day (the shuffle is seeded with the date), so reloading doesn't reshuffle it.
-function seeded(str) {
-  let t = [...str].reduce((h, c) => Math.imul(h ^ c.charCodeAt(0), 16777619), 2166136261) >>> 0;
-  return () => { t += 0x6D2B79F5; let r = Math.imul(t ^ t >>> 15, 1 | t); r ^= r + Math.imul(r ^ r >>> 7, 61 | r); return ((r ^ r >>> 14) >>> 0) / 4294967296; };
-}
-function shuffleWith(arr, rnd) {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
-  return a;
-}
+// ---------- accuracy helpers ----------
 const pctOf = r => Math.round(100 * r.c / r.n);
 const level = p => p < 60 ? 'low' : p < 80 ? 'mid' : 'high';
 function weakSkills(acc) {
   return [...acc.skill].filter(([k, r]) => r.n >= 3 && pctOf(r) < 80 && [...S.questions.values()].some(q => q.skill === k))
     .sort((x, y) => pctOf(x[1]) - pctOf(y[1]) || y[1].n - x[1].n);
-}
-function todayPlan(N) {
-  const all = [...S.questions.values()], h = history(), rs = reviewState(), acc = accuracy();
-  const rnd = seeded(`${dateKey()}|${N}`);
-  const used = new Set(), take = (list, n) => { const out = []; for (const q of list) { if (out.length >= n) break; if (!used.has(q.id)) { used.add(q.id); out.push(q); } } return out; };
-  const due = take(shuffleWith(all.filter(q => rs.get(q.id)?.status === 'due'), rnd), Math.ceil(N * 0.4));
-  const weakList = weakSkills(acc).slice(0, 2);
-  const weakNames = weakList.map(([k]) => k);
-  const weak = take(shuffleWith(all.filter(q => weakNames.includes(q.skill) && STATUS.unseen(h, q)), rnd), Math.ceil(N * 0.3));
-  // New questions, dealt one skill at a time so the set covers as many skills as it can.
-  const bySkill = new Map();
-  for (const q of shuffleWith(all.filter(q => STATUS.unseen(h, q)), rnd)) { if (!bySkill.has(q.skill)) bySkill.set(q.skill, []); bySkill.get(q.skill).push(q); }
-  const fresh = [], decks = shuffleWith([...bySkill.values()], rnd);
-  while (due.length + weak.length + fresh.length < N && decks.some(d => d.length)) {
-    for (const d of decks) { const q = d.shift(); if (q && !used.has(q.id) && due.length + weak.length + fresh.length < N) { used.add(q.id); fresh.push(q); } }
-  }
-  // A bank that is mostly answered already tops up with anything not yet in the set.
-  const extra = take(shuffleWith(all, rnd), N - due.length - weak.length - fresh.length);
-  return { due, weak, weakList, fresh: [...fresh, ...extra], items: [...due.map(q => [q, 'review']), ...weak.map(q => [q, 'weak']), ...fresh.map(q => [q, 'new']), ...extra.map(q => [q, 'new'])] };
 }
 
 // ---------- rendering ----------
@@ -592,7 +562,7 @@ function img(c) {
 }
 const SHELL = ['home', 'practice', 'mistakes', 'skills', 'bank', 'results'];
 function render() {
-  const views = { home: viewToday, practice: viewPractice, mistakes: viewMistakes, skills: viewSkills, bank: viewBank, results: viewResults, test: viewTest, study: viewStudy, check: viewCheck, review: viewReview };
+  const views = { home: viewStart, practice: viewPractice, mistakes: viewMistakes, skills: viewSkills, bank: viewBank, results: viewResults, test: viewTest, study: viewStudy, check: viewCheck, review: viewReview };
   const onMath = (S.view === 'test' || S.view === 'study') && S.cur && S.questions.get(S.cur.qids[S.cur.idx])?.section === 'Math';
   const html = views[S.view]();
   $('#app').innerHTML = SHELL.includes(S.view) ? shell(html) : html + (S.ref && onMath ? refSheet() : '');
@@ -600,14 +570,14 @@ function render() {
   if (S.view === 'check') updateClock();
 }
 const ICONS = {
-  home: '<circle cx="10" cy="10" r="3.2"/><path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M4.7 15.3l1.4-1.4M13.9 6.1l1.4-1.4"/>',
+  home: '<circle cx="10" cy="10" r="7"/><path d="M8 7l5 3-5 3z"/>',
   practice: '<path d="M4 3.5h12v13H4z"/><path d="M7 7.5h6M7 10.5h6M7 13.5h3.5"/>',
   mistakes: '<path d="M5.5 3h9v14l-4.5-3-4.5 3z"/><path d="M8.3 7l3.4 3.4M11.7 7l-3.4 3.4"/>',
   skills: '<path d="M3.5 3.5h5v5h-5zM11.5 3.5h5v5h-5zM3.5 11.5h5v5h-5zM11.5 11.5h5v5h-5z"/>',
   bank: '<path d="M3 6.5l7-3.5 7 3.5-7 3.5z"/><path d="M3 10l7 3.5 7-3.5M3 13.5l7 3.5 7-3.5"/>',
 };
 const icon = k => `<svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true">${ICONS[k]}</svg>`;
-const NAV = [['home', 'Today'], ['practice', 'Practice'], ['mistakes', 'Mistakes'], ['skills', 'Skills'], ['bank', 'Question bank']];
+const NAV = [['home', 'Get started'], ['practice', 'Practice'], ['mistakes', 'Mistakes'], ['skills', 'Skills'], ['bank', 'Question bank']];
 function shell(main) {
   const due = [...reviewState().values()].filter(r => r.status === 'due').length;
   const here = S.view === 'results' ? 'practice' : S.view;
@@ -648,58 +618,39 @@ function fmtDuration(sec) {
   return h ? `${h} h ${m} min` : `${m} min`;
 }
 
-// ---------- Today ----------
-function stripHtml(items, attempt) {
-  return `<div class="strip" role="img" aria-label="${items.length} questions">${items.map(([q, kind], i) => {
-    let st = '';
-    if (attempt?.checked?.[q.id]) st = grade(q, attempt) === true ? 'ok' : 'bad';
-    const now = attempt && !attempt.finishedAt && attempt.idx === i ? 'now' : '';
-    return `<i class="slot ${kind} ${st} ${now}" title="${i + 1}. ${esc(short(q.skill))}"></i>`;
-  }).join('')}</div>`;
-}
+// ---------- Get started ----------
 const KIND_LABEL = { review: 'Review', weak: 'Weakest skill', new: 'New' };
-const stripKey = `<div class="strip-key"><span><i class="k review"></i>Review</span><span><i class="k weak"></i>Weakest skill</span><span><i class="k new"></i>New</span></div>`;
-function viewToday() {
-  const all = [...S.questions.values()];
-  if (S.offline) return `<h1 class="title">The database is not running.</h1><p class="lede">Close this tab, double-click “Start Module Builder.bat”, and use the page it opens.</p>`;
-  if (!all.length) return `<p class="eyebrow-date">${longDate()}</p><h1 class="title">Start by adding questions.</h1>
-    <p class="lede">Module Builder plans a short study set for you every day from the questions you add, then brings back anything you miss until you’ve got it.</p>
-    <ol class="steps"><li>Export a set of questions as a PDF from the <a href="https://satsuiteeducatorquestionbank.collegeboard.org/" target="_blank" rel="noopener">College Board question bank</a>. It’s free.</li><li>Drop the PDF anywhere on this page, or use Add questions.</li><li>Come back here for today’s set.</li></ol>
-    <div class="row"><button class="btn" data-act="choose">Add questions</button><button class="link" data-act="choose">Restore a backup</button></div>
-    <p class="fine">Everything is saved ${where()}, on this device only.</p>`;
-
-  const key = dateKey();
-  const mine = S.modules.filter(m => m.today === key);
-  const tAttempts = S.attempts.filter(a => mine.some(m => m.id === a.moduleId));
-  const open = tAttempts.find(a => !a.finishedAt);
-  const done = tAttempts.filter(a => a.finishedAt).sort((a, b) => b.finishedAt - a.finishedAt)[0];
-  let hero;
-  if (open) {
-    const m = S.modules.find(x => x.id === open.moduleId), items = open.qids.map(id => [S.questions.get(id), m.kinds?.[id] || 'new']).filter(([q]) => q);
-    const left = open.qids.filter(id => !open.checked[id]).length;
-    hero = `<h1 class="title">Pick up where you stopped.</h1><p class="lede">${left} of ${open.qids.length} questions left in today’s set.</p>${stripHtml(items, open)}${stripKey}
-      <div class="row"><button class="btn big" data-act="resume" data-id="${open.id}">Continue today’s set</button></div>`;
-  } else if (done && !S.anotherSet) {
-    const m = S.modules.find(x => x.id === done.moduleId), items = done.qids.map(id => [S.questions.get(id), m?.kinds?.[id] || 'new']).filter(([q]) => q);
-    const t = tally(done);
-    hero = `<h1 class="title">Done for today.</h1><p class="lede">${t.c} of ${t.n} right${t.n < done.qids.length ? `, ${done.qids.length - t.n} skipped` : ''}. Anything you missed comes back tomorrow.</p>${stripHtml(items, done)}${stripKey}
-      <div class="row"><button class="btn big" data-act="results" data-id="${done.id}">See today’s results</button><button class="link" data-act="another-set">Do another set</button></div>`;
-  } else {
-    const N = S.todayN, plan = todayPlan(N), hasHistory = accuracy().total.n > 0;
-    S.plan = plan;
-    const rows = [];
-    if (plan.due.length) rows.push(['review', plan.due.length, 'Questions you missed, due again', 'A miss comes back the next day, then 3 days later, and clears after two right answers in a row.']);
-    if (plan.weak.length) rows.push(['weak', plan.weak.length, 'Your weakest skills', plan.weakList.map(([k, r]) => `${short(k)} at ${pctOf(r)}% right`).join(', ') + '.']);
-    if (plan.fresh.length) rows.push(['new', plan.fresh.length, 'New questions', hasHistory ? `Spread across ${new Set(plan.fresh.map(q => q.skill)).size} skills you haven’t finished seeing.` : 'Answer these and the app learns where you need practice.']);
-    hero = `<h1 class="title">Today’s set is ready.</h1>
-      <p class="lede">${plural(plan.items.length, 'question')}, about ${Math.max(1, Math.round(defaultSeconds(plan.items.map(([q]) => q)) / 60))} minutes. You check each answer as you go.</p>
-      ${stripHtml(plan.items)}${stripKey}
-      <div class="row"><button class="btn big" data-act="today-start" ${plan.items.length ? '' : 'disabled'}>Start today’s set</button><span class="sizes"><span class="fine">Size</span>${seg('today-n', [[5, '5'], [10, '10'], [20, '20']].map(([v, l]) => [String(v), l]), String(N))}</span></div>
-      <div class="why">${rows.map(([k, n, h, p]) => `<div class="why-row"><b class="n ${k}">${n}</b><div><h3>${h}</h3><p>${esc(p)}</p></div></div>`).join('')}</div>`;
-  }
-  const others = S.modules.filter(m => !m.today).map(m => [m, S.attempts.find(a => a.moduleId === m.id && !a.finishedAt)]).filter(([, a]) => a).slice(-3).reverse();
-  const cont = others.length ? `<section class="block"><h2>Unfinished</h2><div class="list">${others.map(([m, a]) => `<div class="li"><div class="li-main"><div class="li-title">${esc(m.name)}</div><div class="li-meta">${m.mode === 'study' ? 'Study' : 'Test'}, question ${a.idx + 1} of ${a.qids.length}</div></div><button class="btn ghost small" data-act="resume" data-id="${a.id}">Resume</button></div>`).join('')}</div></section>` : '';
-  return `<p class="eyebrow-date">${longDate()}</p>${hero}${cont}`;
+// How progress is kept, and the backup controls. Shared by Get started and Question bank.
+function saveHelp() {
+  if (backend === 'server') return `<p>Your progress saves by itself after every answer, in the data folder next to this app. To back it up or move it to another computer, copy that folder.</p>`;
+  return `<p>Your progress saves by itself after every answer, in this browser on this device. There\u2019s no account and nothing is uploaded, so:</p>
+    <ul><li>Another browser or another computer won\u2019t see it.</li><li>Clearing your browsing data deletes it, and a private window doesn\u2019t keep it.</li></ul>
+    <p>Export a backup now and then. To move to another computer, restore that file there.</p>`;
+}
+function backupControls() {
+  if (FRAMED) return `<p class="fine">Exporting a backup doesn\u2019t work in this preview, because it can\u2019t save files. Open the app at <a href="https://iamraging123.github.io/module-builder/" target="_blank" rel="noopener">iamraging123.github.io/module-builder</a> to export.</p><div class="row"><button class="link" data-act="choose">Restore a backup</button></div>`;
+  return `<div class="row"><button class="btn ghost" data-act="export" data-v="all">Export everything</button><button class="btn ghost" data-act="export" data-v="results">Export results only</button><button class="link" data-act="choose">Restore a backup</button></div>
+    <p class="fine">Everything includes the question images, so the file is large. Results only is small: restore it after adding the same PDFs again.</p>`;
+}
+function viewStart() {
+  if (S.offline) return `<h1 class="title">The database is not running.</h1><p class="lede">Close this tab, double-click \u201cStart Module Builder.bat\u201d, and use the page it opens.</p>`;
+  const n = S.questions.size, acc = accuracy(), answered = acc.total.n > 0, missed = reviewState().size > 0;
+  const step = (done, title, body, actions = '') => `<li class="gs ${done ? 'done' : ''}"><div class="gs-body"><h2>${title}${done ? '<span class="gs-done">Done</span>' : ''}</h2>${body}${actions ? `<div class="row">${actions}</div>` : ''}</div></li>`;
+  return `<h1 class="title">Get started</h1>
+    <p class="lede">Module Builder turns SAT and PSAT questions from the College Board question bank into timed practice tests and study sessions, then brings back what you got wrong until you\u2019ve got it.</p>
+    <ol class="gs-list">
+      ${step(n > 0, 'Get questions from the College Board', `<p>Open the <a href="https://satsuiteeducatorquestionbank.collegeboard.org/" target="_blank" rel="noopener">College Board question bank</a>. It\u2019s free and needs no account.</p>
+        <ul><li>Choose the test (SAT, PSAT/NMSQT and PSAT 10, or PSAT 8/9), a section, and the domains and skills you want.</li><li>Tick the questions you want, or select them all.</li><li>Export them, and save the PDF.</li></ul>
+        <p class="fine">Full practice tests from Bluebook can\u2019t be imported. Question bank exports are the way in.</p>`)}
+      ${step(n > 0, 'Add the PDF here', `<p>Drop the PDF anywhere on this page, or press Add questions. It takes about a second per question. Adding the same questions again updates them instead of making copies.</p>
+        ${n ? `<p class="fine">Your bank has ${plural(n, 'question')}.</p>` : ''}`, `<button class="btn" data-act="choose">Add questions</button>`)}
+      ${step(answered, 'Practise', `<p>In Practice, filter by section, difficulty, skill or history, then pick a mode:</p>
+        <ul><li><b>Test</b>: timed like the real thing, with your score and answers at the end.</li><li><b>Study</b>: no clock pressure. Check each answer as you go and read the explanation.</li></ul>
+        <p class="fine">Math questions have the Desmos calculator used on the test and a formula reference.</p>`, n ? `<button class="btn ghost" data-act="go" data-v="practice">Go to Practice</button>` : '')}
+      ${step(missed, 'Review your mistakes', `<p>Every question you miss goes to Mistakes. It comes back the next day, then 3 days later, and clears once you get it right twice in a row. In study mode you can note why you missed it, so you can spot patterns like falling for trap answers.</p>`, missed ? `<button class="btn ghost" data-act="go" data-v="mistakes">Go to Mistakes</button>` : '')}
+      ${step(answered, 'Watch your skills', `<p>Skills colours every skill on the test by how often you get it right. Click one to see your numbers and drill it with five new questions.</p>`, answered ? `<button class="btn ghost" data-act="go" data-v="skills">Go to Skills</button>` : '')}
+      ${step(false, 'Keep your progress safe', saveHelp(), '')}
+    </ol>${backupControls()}`;
 }
 
 // ---------- Practice ----------
@@ -840,10 +791,7 @@ function viewBank() {
     <button class="drop" data-act="choose"><b>Add questions</b><span>Drop question bank PDFs or JSON question sets here, or click to choose files. A question you already have is updated, not added twice.</span></button>
     <p class="fine">Get PDFs from the <a href="https://satsuiteeducatorquestionbank.collegeboard.org/" target="_blank" rel="noopener">College Board question bank</a>: pick questions, then export them as a PDF.</p>
     ${sources.length ? `<section class="block"><h2>Files</h2><div class="list">${sources.map(x => `<div class="li"><div class="li-main"><div class="li-title" title="${esc(x)}">${esc(x)}</div><div class="li-meta">${plural(all.filter(q => q.source === x).length, 'question')}</div></div><div class="li-acts"><button class="link danger" data-act="del-source" data-v="${esc(x)}">Remove</button></div></div>`).join('')}</div></section>` : ''}
-    <section class="block"><h2>Backup</h2><p class="body">Your questions, modules and results are saved ${where()}.${backend === 'browser' ? ' Clearing your browsing data deletes them, so export a backup now and then.' : ''}</p>
-      ${FRAMED ? `<p class="fine">Exporting a backup doesn’t work in this preview, because it can’t save files. Open the app at <a href="https://iamraging123.github.io/module-builder/" target="_blank" rel="noopener">iamraging123.github.io/module-builder</a> to export.</p><div class="row"><button class="link" data-act="choose">Restore a backup</button></div>`
-        : `<div class="row"><button class="btn ghost" data-act="export" data-v="all">Export everything</button><button class="btn ghost" data-act="export" data-v="results">Export results only</button><button class="link" data-act="choose">Restore a backup</button></div>
-      <p class="fine">Everything includes the question images, so the file is large. Results only is small: restore it after adding the same PDFs again.</p>`}</section>`;
+    <section class="block"><h2>Backup</h2><div class="body">${saveHelp()}</div>${backupControls()}</section>`;
 }
 
 // ---------- test mode (Bluebook-style) ----------
@@ -966,7 +914,7 @@ function viewResults() {
   const missed = counted(a).filter(q => grade(q, a) !== true).length;
   const mod = S.modules.find(m => m.id === a.moduleId);
   const others = S.attempts.filter(x => x.moduleId === a.moduleId && x.finishedAt).sort((x, y) => y.finishedAt - x.finishedAt);
-  return `<button class="link back" data-act="go" data-v="${mod?.today ? 'home' : 'practice'}">${mod?.today ? 'Back to Today' : 'Back to Practice'}</button>
+  return `<button class="link back" data-act="go" data-v="practice">Back to Practice</button>
     <h1 class="title">${esc(a.name)}</h1><p class="lede">${new Date(a.finishedAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}, ${fmtDuration(a.elapsed)}${a.seconds ? ` of ${fmtDuration(a.seconds)}` : ''}.</p>
     <div class="score"><b>${t.c}/${t.n}</b><span>${t.n ? pctOf({ c: t.c, n: t.n }) : 0}% right${a.mode === 'study' && t.n < qs.length ? `, ${qs.length - t.n} skipped` : ''}${t.p ? `, ${t.p} to check yourself` : ''}</span></div>
     <div class="row">${missed ? `<button class="btn" data-act="retake-missed">Practise the ${missed} missed</button>` : ''}${mod ? `<button class="btn ghost" data-act="start" data-id="${a.moduleId}">${a.mode === 'study' ? 'Study again' : 'Retake'}</button>` : ''}</div>
@@ -1022,23 +970,11 @@ async function studySet(qs, name, kinds) {
   await startAttempt(await createModule(qs, name, null, 'study', { auto: true, ...(kinds ? { kinds } : {}) }));
 }
 const A = {
-  go: d => { S.view = d.v; S.anotherSet = false; render(); scrollTo(0, 0); },
+  go: d => { S.view = d.v; render(); scrollTo(0, 0); },
   home: () => A.go({ v: 'home' }),
   choose: () => $('#file').click(),
   dismiss: () => { S.notice = ''; render(); },
   export: d => exportBackup(d.v === 'all'),
-
-  // Today
-  'today-n': d => { S.todayN = +d.v; try { localStorage.setItem('mb-today-n', d.v); } catch {} render(); },
-  async 'today-start'() {
-    const plan = S.plan || todayPlan(S.todayN);
-    if (!plan.items.length) return;
-    const kinds = Object.fromEntries(plan.items.map(([q, k]) => [q.id, k]));
-    const m = await createModule(plan.items.map(([q]) => q), `Today, ${shortDate(Date.now())}`, null, 'study', { today: dateKey(), kinds, auto: true });
-    S.anotherSet = false;
-    await startAttempt(m);
-  },
-  'another-set': () => { S.anotherSet = true; render(); },
 
   // Practice
   'f-section': d => { S.filter.section = d.v; S.filter.skills.clear(); resetCounts(); render(); },
@@ -1446,6 +1382,7 @@ async function migrateBrowserStore() {
     S.modules = st.modules.sort((a, b) => a.createdAt - b.createdAt);
     S.attempts = st.attempts;
   }
+  if (S.questions.size) S.view = 'practice';
   render();
   if (backend === 'server' && !S.offline) await migrateBrowserStore();
   // Dev hook: index.html?load=a.pdf,b.pdf imports files served next to the page.
