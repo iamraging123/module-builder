@@ -40,6 +40,8 @@ const canon = s => CANON.get(nos(s).toLowerCase()) || s.replace(/\s+/g, ' ').tri
 // "?browser" in the address forces browser storage, for testing the hosted mode locally.
 const LOCAL = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname) && !new URLSearchParams(location.search).has('browser');
 let backend = 'server';
+// Inside a preview frame (a Claude artifact) the browser blocks file downloads, so backup export is unavailable there.
+const FRAMED = (() => { try { return window.top !== window.self; } catch { return true; } })();
 const where = () => backend === 'browser' ? 'in this browser' : 'in the data folder next to this app';
 let bdbp;
 function browserDb() {
@@ -111,6 +113,8 @@ const S = {
   form: { mode: 'test', count: null, minutes: null, timed: true, shuffle: false },
   cur: null, elim: false, nav: false, clockHidden: false, ref: false,
   rev: null,
+  todayN: (() => { try { return +localStorage.getItem('mb-today-n') || 10; } catch { return 10; } })(),
+  plan: null, anotherSet: false, mistakeFilter: '', showCleared: false, skillSel: null, skillsOpen: false,
 };
 
 // ---------- PDF import ----------
@@ -411,12 +415,6 @@ function accuracy() {
   }
   return by;
 }
-// Under 60% is a weak spot, 60-79% is getting there, 80% and up is solid. The number is always shown, so colour is not the only cue.
-function accBadge(r) {
-  if (!r) return '';
-  const pct = Math.round(100 * r.c / r.n);
-  return `<em class="acc ${pct < 60 ? 'low' : pct < 80 ? 'mid' : 'high'}" title="${r.c} right out of ${r.n} answered">${pct}%</em>`;
-}
 const STATUS = {
   unseen: (h, q) => !h.has(q.id),
   missed: (h, q) => h.get(q.id)?.last === false,
@@ -438,8 +436,9 @@ function shuffle(arr) {
 const sectionOf = qs => { const s = new Set(qs.map(q => q.section)); return s.size === 1 ? [...s][0] : 'Mixed'; };
 
 // mode 'test' = Bluebook-style module graded at the end; 'study' = one question at a time, checked as you go.
-async function createModule(qs, name, seconds, mode = 'test') {
-  const m = { id: uid(), name, mode, qids: qs.map(q => q.id), seconds: mode === 'study' ? null : seconds, section: sectionOf(qs), createdAt: Date.now() };
+// extra: { today, kinds, auto } for sets the app builds itself.
+async function createModule(qs, name, seconds, mode = 'test', extra = {}) {
+  const m = { ...extra, id: uid(), name, mode, qids: qs.map(q => q.id), seconds: mode === 'study' ? null : seconds, section: sectionOf(qs), createdAt: Date.now() };
   await put('modules', m);
   S.modules.push(m);
   return m;
@@ -447,7 +446,7 @@ async function createModule(qs, name, seconds, mode = 'test') {
 async function startAttempt(m) {
   const qids = m.qids.filter(id => S.questions.has(id));
   if (!qids.length) { S.notice = 'That module has no questions left in the bank.'; S.noticeErr = true; return render(); }
-  const a = { id: uid(), moduleId: m.id, name: m.name, mode: m.mode || 'test', checked: {}, section: m.section, qids, seconds: m.seconds, remaining: m.seconds, elapsed: 0, idx: 0, answers: {}, marked: {}, struck: {}, self: {}, startedAt: Date.now(), finishedAt: null };
+  const a = { id: uid(), moduleId: m.id, name: m.name, mode: m.mode || 'test', checked: {}, checkedAt: {}, why: {}, section: m.section, qids, seconds: m.seconds, remaining: m.seconds, elapsed: 0, idx: 0, answers: {}, marked: {}, struck: {}, self: {}, startedAt: Date.now(), finishedAt: null };
   await put('attempts', a);
   S.attempts.push(a);
   openAttempt(a);
@@ -502,6 +501,84 @@ async function leaveTest() {
   render();
 }
 
+// ---------- review schedule ----------
+// A missed question comes back the day after the miss, then 3 days after the next right answer,
+// and is cleared after two right answers in a row.
+const DAY = 864e5;
+const startOfDay = t => { const d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); };
+const dateKey = (t = Date.now()) => new Date(t).toISOString().slice(0, 10);
+function reviewState() {
+  const ev = new Map(), why = new Map();
+  for (const a of S.attempts.filter(a => a.finishedAt || a.mode === 'study')) {
+    for (const q of counted(a)) {
+      const g = grade(q, a);
+      if (g === null) continue;
+      const t = a.checkedAt?.[q.id] || a.finishedAt || a.startedAt;
+      if (!ev.has(q.id)) ev.set(q.id, []);
+      ev.get(q.id).push({ t, g });
+      const w = a.why?.[q.id];
+      if (w && (!why.has(q.id) || why.get(q.id).t < t)) why.set(q.id, { ...w, t });
+    }
+  }
+  const out = new Map(), today = startOfDay(Date.now());
+  for (const [id, list] of ev) {
+    list.sort((x, y) => x.t - y.t);
+    const wrongs = list.filter(e => !e.g).length;
+    if (!wrongs) continue;
+    let streak = 0;
+    for (let i = list.length - 1; i >= 0 && list[i].g; i--) streak++;
+    const last = list[list.length - 1];
+    const due = startOfDay(last.t) + (streak === 0 ? 1 : 3) * DAY;
+    const status = streak >= 2 ? 'cleared' : due <= today ? 'due' : 'later';
+    out.set(id, { wrongs, streak, last: last.t, due, status, why: why.get(id) || null });
+  }
+  return out;
+}
+const REASONS = {
+  rule: 'Didn’t know the rule',
+  trap: 'Fell for a trap answer',
+  misread: 'Misread the question',
+  rushed: 'Rushed or ran out of time',
+  slip: 'Careless slip',
+};
+
+// ---------- today's set ----------
+// The set is built the same way all day (the shuffle is seeded with the date), so reloading doesn't reshuffle it.
+function seeded(str) {
+  let t = [...str].reduce((h, c) => Math.imul(h ^ c.charCodeAt(0), 16777619), 2166136261) >>> 0;
+  return () => { t += 0x6D2B79F5; let r = Math.imul(t ^ t >>> 15, 1 | t); r ^= r + Math.imul(r ^ r >>> 7, 61 | r); return ((r ^ r >>> 14) >>> 0) / 4294967296; };
+}
+function shuffleWith(arr, rnd) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+  return a;
+}
+const pctOf = r => Math.round(100 * r.c / r.n);
+const level = p => p < 60 ? 'low' : p < 80 ? 'mid' : 'high';
+function weakSkills(acc) {
+  return [...acc.skill].filter(([k, r]) => r.n >= 3 && pctOf(r) < 80 && [...S.questions.values()].some(q => q.skill === k))
+    .sort((x, y) => pctOf(x[1]) - pctOf(y[1]) || y[1].n - x[1].n);
+}
+function todayPlan(N) {
+  const all = [...S.questions.values()], h = history(), rs = reviewState(), acc = accuracy();
+  const rnd = seeded(`${dateKey()}|${N}`);
+  const used = new Set(), take = (list, n) => { const out = []; for (const q of list) { if (out.length >= n) break; if (!used.has(q.id)) { used.add(q.id); out.push(q); } } return out; };
+  const due = take(shuffleWith(all.filter(q => rs.get(q.id)?.status === 'due'), rnd), Math.ceil(N * 0.4));
+  const weakList = weakSkills(acc).slice(0, 2);
+  const weakNames = weakList.map(([k]) => k);
+  const weak = take(shuffleWith(all.filter(q => weakNames.includes(q.skill) && STATUS.unseen(h, q)), rnd), Math.ceil(N * 0.3));
+  // New questions, dealt one skill at a time so the set covers as many skills as it can.
+  const bySkill = new Map();
+  for (const q of shuffleWith(all.filter(q => STATUS.unseen(h, q)), rnd)) { if (!bySkill.has(q.skill)) bySkill.set(q.skill, []); bySkill.get(q.skill).push(q); }
+  const fresh = [], decks = shuffleWith([...bySkill.values()], rnd);
+  while (due.length + weak.length + fresh.length < N && decks.some(d => d.length)) {
+    for (const d of decks) { const q = d.shift(); if (q && !used.has(q.id) && due.length + weak.length + fresh.length < N) { used.add(q.id); fresh.push(q); } }
+  }
+  // A bank that is mostly answered already tops up with anything not yet in the set.
+  const extra = take(shuffleWith(all, rnd), N - due.length - weak.length - fresh.length);
+  return { due, weak, weakList, fresh: [...fresh, ...extra], items: [...due.map(q => [q, 'review']), ...weak.map(q => [q, 'weak']), ...fresh.map(q => [q, 'new']), ...extra.map(q => [q, 'new'])] };
+}
+
 // ---------- rendering ----------
 // One piece of a question: a cropped image from a PDF, or text (passage, prompt, choice, explanation, rule) from a JSON set.
 function content(c) {
@@ -513,30 +590,122 @@ function img(c) {
   if (!c) return '';
   return `<img src="${c.url}" alt="" width="${c.w}" height="${c.h}" style="width:${Math.round(c.w / SCALE * ZOOM)}px">`;
 }
+const SHELL = ['home', 'practice', 'mistakes', 'skills', 'bank', 'results'];
 function render() {
-  const views = { home: viewHome, stats: viewStats, test: viewTest, study: viewStudy, check: viewCheck, results: viewResults, review: viewReview };
+  const views = { home: viewToday, practice: viewPractice, mistakes: viewMistakes, skills: viewSkills, bank: viewBank, results: viewResults, test: viewTest, study: viewStudy, check: viewCheck, review: viewReview };
   const onMath = (S.view === 'test' || S.view === 'study') && S.cur && S.questions.get(S.cur.qids[S.cur.idx])?.section === 'Math';
-  $('#app').innerHTML = views[S.view]() + (S.ref && onMath ? refSheet() : '');
+  const html = views[S.view]();
+  $('#app').innerHTML = SHELL.includes(S.view) ? shell(html) : html + (S.ref && onMath ? refSheet() : '');
   if (S.view === 'test' || S.view === 'study') { updateClock(); const i = $('#spr'); if (i && !i.disabled) i.focus(); }
   if (S.view === 'check') updateClock();
 }
-
-// Filters are drawn as answer-sheet bubbles: filled in means selected.
-function bubble(act, val, label, on, count, radio, extra = '') {
-  return `<button class="bub ${on ? 'on' : ''}" role="${radio ? 'radio' : 'checkbox'}" aria-checked="${on}" data-act="${act}" data-v="${esc(val)}"><i></i><span>${esc(label)}</span>${count != null ? `<small>${count}</small>` : ''}${extra}</button>`;
-}
-function appBar(right) {
-  return `<header class="bar"><div class="bar-in"><button class="brand" data-act="home">Module Builder</button>${right}</div></header><div class="bb-dash"></div>`;
+const ICONS = {
+  home: '<circle cx="10" cy="10" r="3.2"/><path d="M10 2.5v2M10 15.5v2M2.5 10h2M15.5 10h2M4.7 4.7l1.4 1.4M13.9 13.9l1.4 1.4M4.7 15.3l1.4-1.4M13.9 6.1l1.4-1.4"/>',
+  practice: '<path d="M4 3.5h12v13H4z"/><path d="M7 7.5h6M7 10.5h6M7 13.5h3.5"/>',
+  mistakes: '<path d="M5.5 3h9v14l-4.5-3-4.5 3z"/><path d="M8.3 7l3.4 3.4M11.7 7l-3.4 3.4"/>',
+  skills: '<path d="M3.5 3.5h5v5h-5zM11.5 3.5h5v5h-5zM3.5 11.5h5v5h-5zM11.5 11.5h5v5h-5z"/>',
+  bank: '<path d="M3 6.5l7-3.5 7 3.5-7 3.5z"/><path d="M3 10l7 3.5 7-3.5M3 13.5l7 3.5 7-3.5"/>',
+};
+const icon = k => `<svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true">${ICONS[k]}</svg>`;
+const NAV = [['home', 'Today'], ['practice', 'Practice'], ['mistakes', 'Mistakes'], ['skills', 'Skills'], ['bank', 'Question bank']];
+function shell(main) {
+  const due = [...reviewState().values()].filter(r => r.status === 'due').length;
+  const here = S.view === 'results' ? 'practice' : S.view;
+  const nav = NAV.map(([v, label]) => `<button class="nav-i" data-act="go" data-v="${v}" ${here === v ? 'aria-current="page"' : ''}>${icon(v)}<span>${label}</span>${v === 'mistakes' && due ? `<em class="badge" title="${due} due for review">${due}</em>` : ''}</button>`).join('');
+  const status = S.busy || S.notice ? `<div class="status ${!S.busy && S.noticeErr ? 'err' : ''}" role="status"><span id="status-text">${esc(S.busy || S.notice)}</span>${S.busy ? '' : '<button class="link" data-act="dismiss">Dismiss</button>'}</div>` : '';
+  return `<div class="shell"><nav class="side" aria-label="Main"><div class="brand">Module Builder</div><div class="nav">${nav}</div>
+      <div class="side-foot"><span>${S.questions.size ? plural(S.questions.size, 'question') + ' in your bank' : 'Your bank is empty'}</span><button class="btn ghost small" data-act="choose" ${S.busy ? 'disabled' : ''}>Add questions</button></div></nav>
+    <main class="main">${status}${main}</main></div><div class="dropveil" aria-hidden="true">Drop to add these questions to your bank</div>`;
 }
 const shortDate = t => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-function viewHome() {
-  const all = [...S.questions.values()], f = S.filter;
-  if (S.offline) return appBar('') + `<main class="home solo"><h1>The database is not running.</h1><p class="sub">Close this tab, double-click \u201cStart Module Builder.bat\u201d, and use the page it opens.</p></main>`;
-  const bar = appBar(`${all.length ? `<span class="bar-note">${plural(all.length, 'question')} in your bank</span><button class="pill ghost" data-act="stats">Your stats</button>` : ''}<button class="pill" data-act="choose" ${S.busy ? 'disabled' : ''}>Add questions</button>`);
-  const status = S.busy || S.notice ? `<div class="status ${!S.busy && S.noticeErr ? 'err' : ''}"><span id="status-text">${esc(S.busy || S.notice)}</span>${S.busy ? '' : '<button class="link" data-act="dismiss">Dismiss</button>'}</div>` : '';
-  const veil = `<div class="dropveil">Drop to add these questions to your bank</div>`;
-  if (!all.length) return bar + status + `<main class="home solo"><h1>Add questions to start.</h1><p class="sub">Export a set of questions as a PDF from the <a href="https://satsuiteeducatorquestionbank.collegeboard.org/" target="_blank" rel="noopener">College Board question bank</a>, then drop the file anywhere on this page or use Add questions. Everything you add is saved ${where()}, on this device only.</p><p class="sub restore">Moving from another computer? <button class="link" data-act="choose">Restore a backup</button></p></main>` + veil;
+const longDate = (t = Date.now()) => new Date(t).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+// Short names for the test's longest skill names, for tiles and tight spaces.
+const SHORT = {
+  'Nonlinear equations in one variable and systems of equations in two variables': 'Nonlinear equations',
+  'Systems of two linear equations in two variables': 'Systems of linear equations',
+  'Linear inequalities in one or two variables': 'Linear inequalities',
+  'Ratios, rates, proportional relationships, and units': 'Ratios, rates, units',
+  'One-variable data: Distributions and measures of center and spread': 'One-variable data',
+  'Two-variable data: Models and scatterplots': 'Two-variable data',
+  'Inference from sample statistics and margin of error': 'Sample statistics',
+  'Evaluating statistical claims: Observational studies and experiments': 'Statistical claims',
+  'Probability and conditional probability': 'Probability',
+};
+const short = k => SHORT[k] || k;
+function seg(act, options, current) {
+  return `<div class="seg" role="radiogroup">${options.map(([v, label, n]) => `<button role="radio" aria-checked="${v === current}" data-act="${act}" data-v="${esc(v)}">${esc(label)}${n != null ? `<small>${n}</small>` : ''}</button>`).join('')}</div>`;
+}
+function tick_(act, val, label, on, extra = '') {
+  return `<button class="tick" role="checkbox" aria-checked="${on}" data-act="${act}" data-v="${esc(val)}"><i aria-hidden="true"></i><span>${esc(label)}</span>${extra}</button>`;
+}
+function accBadge(r) {
+  if (!r) return '';
+  const p = pctOf(r);
+  return `<em class="acc ${level(p)}" title="${r.c} right out of ${r.n} answered">${p}%</em>`;
+}
+function fmtDuration(sec) {
+  const h = Math.floor(sec / 3600), m = Math.round(sec % 3600 / 60);
+  return h ? `${h} h ${m} min` : `${m} min`;
+}
 
+// ---------- Today ----------
+function stripHtml(items, attempt) {
+  return `<div class="strip" role="img" aria-label="${items.length} questions">${items.map(([q, kind], i) => {
+    let st = '';
+    if (attempt?.checked?.[q.id]) st = grade(q, attempt) === true ? 'ok' : 'bad';
+    const now = attempt && !attempt.finishedAt && attempt.idx === i ? 'now' : '';
+    return `<i class="slot ${kind} ${st} ${now}" title="${i + 1}. ${esc(short(q.skill))}"></i>`;
+  }).join('')}</div>`;
+}
+const KIND_LABEL = { review: 'Review', weak: 'Weakest skill', new: 'New' };
+const stripKey = `<div class="strip-key"><span><i class="k review"></i>Review</span><span><i class="k weak"></i>Weakest skill</span><span><i class="k new"></i>New</span></div>`;
+function viewToday() {
+  const all = [...S.questions.values()];
+  if (S.offline) return `<h1 class="title">The database is not running.</h1><p class="lede">Close this tab, double-click “Start Module Builder.bat”, and use the page it opens.</p>`;
+  if (!all.length) return `<p class="eyebrow-date">${longDate()}</p><h1 class="title">Start by adding questions.</h1>
+    <p class="lede">Module Builder plans a short study set for you every day from the questions you add, then brings back anything you miss until you’ve got it.</p>
+    <ol class="steps"><li>Export a set of questions as a PDF from the <a href="https://satsuiteeducatorquestionbank.collegeboard.org/" target="_blank" rel="noopener">College Board question bank</a>. It’s free.</li><li>Drop the PDF anywhere on this page, or use Add questions.</li><li>Come back here for today’s set.</li></ol>
+    <div class="row"><button class="btn" data-act="choose">Add questions</button><button class="link" data-act="choose">Restore a backup</button></div>
+    <p class="fine">Everything is saved ${where()}, on this device only.</p>`;
+
+  const key = dateKey();
+  const mine = S.modules.filter(m => m.today === key);
+  const tAttempts = S.attempts.filter(a => mine.some(m => m.id === a.moduleId));
+  const open = tAttempts.find(a => !a.finishedAt);
+  const done = tAttempts.filter(a => a.finishedAt).sort((a, b) => b.finishedAt - a.finishedAt)[0];
+  let hero;
+  if (open) {
+    const m = S.modules.find(x => x.id === open.moduleId), items = open.qids.map(id => [S.questions.get(id), m.kinds?.[id] || 'new']).filter(([q]) => q);
+    const left = open.qids.filter(id => !open.checked[id]).length;
+    hero = `<h1 class="title">Pick up where you stopped.</h1><p class="lede">${left} of ${open.qids.length} questions left in today’s set.</p>${stripHtml(items, open)}${stripKey}
+      <div class="row"><button class="btn big" data-act="resume" data-id="${open.id}">Continue today’s set</button></div>`;
+  } else if (done && !S.anotherSet) {
+    const m = S.modules.find(x => x.id === done.moduleId), items = done.qids.map(id => [S.questions.get(id), m?.kinds?.[id] || 'new']).filter(([q]) => q);
+    const t = tally(done);
+    hero = `<h1 class="title">Done for today.</h1><p class="lede">${t.c} of ${t.n} right${t.n < done.qids.length ? `, ${done.qids.length - t.n} skipped` : ''}. Anything you missed comes back tomorrow.</p>${stripHtml(items, done)}${stripKey}
+      <div class="row"><button class="btn big" data-act="results" data-id="${done.id}">See today’s results</button><button class="link" data-act="another-set">Do another set</button></div>`;
+  } else {
+    const N = S.todayN, plan = todayPlan(N), hasHistory = accuracy().total.n > 0;
+    S.plan = plan;
+    const rows = [];
+    if (plan.due.length) rows.push(['review', plan.due.length, 'Questions you missed, due again', 'A miss comes back the next day, then 3 days later, and clears after two right answers in a row.']);
+    if (plan.weak.length) rows.push(['weak', plan.weak.length, 'Your weakest skills', plan.weakList.map(([k, r]) => `${short(k)} at ${pctOf(r)}% right`).join(', ') + '.']);
+    if (plan.fresh.length) rows.push(['new', plan.fresh.length, 'New questions', hasHistory ? `Spread across ${new Set(plan.fresh.map(q => q.skill)).size} skills you haven’t finished seeing.` : 'Answer these and the app learns where you need practice.']);
+    hero = `<h1 class="title">Today’s set is ready.</h1>
+      <p class="lede">${plural(plan.items.length, 'question')}, about ${Math.max(1, Math.round(defaultSeconds(plan.items.map(([q]) => q)) / 60))} minutes. You check each answer as you go.</p>
+      ${stripHtml(plan.items)}${stripKey}
+      <div class="row"><button class="btn big" data-act="today-start" ${plan.items.length ? '' : 'disabled'}>Start today’s set</button><span class="sizes"><span class="fine">Size</span>${seg('today-n', [[5, '5'], [10, '10'], [20, '20']].map(([v, l]) => [String(v), l]), String(N))}</span></div>
+      <div class="why">${rows.map(([k, n, h, p]) => `<div class="why-row"><b class="n ${k}">${n}</b><div><h3>${h}</h3><p>${esc(p)}</p></div></div>`).join('')}</div>`;
+  }
+  const others = S.modules.filter(m => !m.today).map(m => [m, S.attempts.find(a => a.moduleId === m.id && !a.finishedAt)]).filter(([, a]) => a).slice(-3).reverse();
+  const cont = others.length ? `<section class="block"><h2>Unfinished</h2><div class="list">${others.map(([m, a]) => `<div class="li"><div class="li-main"><div class="li-title">${esc(m.name)}</div><div class="li-meta">${m.mode === 'study' ? 'Study' : 'Test'}, question ${a.idx + 1} of ${a.qids.length}</div></div><button class="btn ghost small" data-act="resume" data-id="${a.id}">Resume</button></div>`).join('')}</div></section>` : '';
+  return `<p class="eyebrow-date">${longDate()}</p>${hero}${cont}`;
+}
+
+// ---------- Practice ----------
+function viewPractice() {
+  const all = [...S.questions.values()], f = S.filter;
+  if (!all.length) return `<h1 class="title">Practice</h1><p class="lede">Add questions to your bank first, then build modules from them here.</p><div class="row"><button class="btn" data-act="choose">Add questions</button></div>`;
   const secs = [...new Set(all.map(q => q.section))];
   const inSec = all.filter(q => !f.section || q.section === f.section);
   const count = (key, v) => inSec.filter(q => q[key] === v).length;
@@ -544,52 +713,39 @@ function viewHome() {
   const hist = history(), statusCount = k => inSec.filter(q => STATUS[k](hist, q)).length;
   const doms = new Map();
   for (const q of inSec) { if (!doms.has(q.domain)) doms.set(q.domain, new Set()); doms.get(q.domain).add(q.skill); }
-  const qs = matching();
+  const qs = matching(), acc = accuracy();
   const n = Math.min(S.form.count ?? qs.length, qs.length);
   const mins = S.form.minutes ?? Math.round(defaultSeconds(qs.slice(0, n)) / 60);
   const filtered = f.section || f.diff.size || f.skills.size || f.status !== 'any';
-  const acc = accuracy();
-  // Weakest skill in the current section, once it has at least three answers behind it.
-  const shown = new Set(inSec.map(q => q.skill));
-  const weakest = [...acc.skill].filter(([k, r]) => shown.has(k) && r.n >= 3).sort((x, y) => x[1].c / x[1].n - y[1].c / y[1].n)[0];
   const study = S.form.mode === 'study';
+  let h = `<h1 class="title">Practice</h1><p class="lede">Build a module from your bank: a timed test like the real thing, or a study session that checks each answer.</p><div class="builder">`;
+  if (secs.length > 1) h += `<div class="field"><span class="lab">Section</span>${seg('f-section', [['', 'Both', all.length], ...secs.map(x => [x, x, all.filter(q => q.section === x).length])], f.section)}</div>`;
+  if (diffs.length > 1) h += `<div class="field"><span class="lab">Difficulty</span><div class="ticks">${diffs.map(d => tick_('f-diff', d, d, f.diff.has(d), `<small>${count('difficulty', d)}</small>`)).join('')}</div></div>`;
+  if (hist.size) h += `<div class="field"><span class="lab">History</span>${seg('f-status', [['any', 'Any'], ['unseen', 'New to me', statusCount('unseen')], ['missed', 'Still missed', statusCount('missed')], ['ever', 'Ever missed', statusCount('ever')]], f.status)}</div>`;
+  h += `<div class="field"><span class="lab">Skills</span><div><div class="row tight"><span>${f.skills.size ? plural(f.skills.size, 'skill') + ' chosen' : 'Any skill'}</span><button class="link" data-act="skills-toggle" aria-expanded="${!!S.skillsOpen}">${S.skillsOpen ? 'Hide the list' : 'Choose skills'}</button></div>
+    ${S.skillsOpen ? `<div class="skill-list">${[...doms].map(([d, sk]) => `<div class="dom"><button class="dom-name" data-act="f-domain" data-v="${esc(d)}" title="Choose or clear every skill in ${esc(d)}">${esc(d)}</button>${[...sk].map(x => tick_('f-skill', x, x, f.skills.has(x), `<small>${count('skill', x)}</small>${accBadge(acc.skill.get(x))}`)).join('')}</div>`).join('')}</div>` : ''}</div></div>`;
+  h += `<div class="field"><span class="lab">Mode</span><div class="modes" role="radiogroup">
+      <button class="mode" role="radio" aria-checked="${!study}" data-act="f-mode" data-v="test"><b>Test</b><span>Timed like the real thing. You see your score and answers at the end.</span></button>
+      <button class="mode" role="radio" aria-checked="${study}" data-act="f-mode" data-v="study"><b>Study</b><span>No clock pressure. Check each answer as you go and read why.</span></button></div></div>`;
+  h += `<div class="go"><p class="match">${qs.length ? `${plural(qs.length, 'question')} match${qs.length === 1 ? 'es' : ''}` : 'No questions match these filters.'}${filtered ? ` <button class="link" data-act="clear-filters">Clear filters</button>` : ''}</p>
+    ${qs.length ? `<div class="opts"><label for="m-count">Use <input class="num" id="m-count" type="number" min="1" max="${qs.length}" value="${n}"> of them</label>
+      <label class="check" for="m-shuffle"><input type="checkbox" id="m-shuffle" ${S.form.shuffle ? 'checked' : ''}> Shuffle</label>
+      ${study ? '' : `<span class="check"><label class="check" for="m-timed"><input type="checkbox" id="m-timed" ${S.form.timed ? 'checked' : ''}> Timed</label><label for="m-min"><input class="num" id="m-min" type="number" min="1" value="${mins}" ${S.form.timed ? '' : 'disabled'}> min</label></span>`}</div>
+    <button class="btn big" data-act="create">${study ? 'Start studying' : 'Start the test'}</button>` : ''}</div></div>`;
 
-  let h = bar + status + `<main class="home"><section><h1>Build a module</h1>`;
-  // A row is only shown when it offers a real choice.
-  if (secs.length > 1) h += `<div class="frow"><div class="lab">Section</div><div class="bubs" role="radiogroup">${bubble('f-section', '', 'Both', !f.section, all.length, true)}${secs.map(x => bubble('f-section', x, x, f.section === x, all.filter(q => q.section === x).length, true)).join('')}</div></div>`;
-  if (diffs.length > 1) h += `<div class="frow"><div class="lab">Difficulty</div><div class="bubs">${diffs.map(d => bubble('f-diff', d, d, f.diff.has(d), count('difficulty', d))).join('')}</div></div>`;
-  if (hist.size) h += `<div class="frow"><div class="lab">History</div><div class="bubs" role="radiogroup">${bubble('f-status', 'any', 'Any', f.status === 'any', null, true)}${bubble('f-status', 'unseen', 'New to me', f.status === 'unseen', statusCount('unseen'), true)}${bubble('f-status', 'missed', 'Still missed', f.status === 'missed', statusCount('missed'), true)}${bubble('f-status', 'ever', 'Ever missed', f.status === 'ever', statusCount('ever'), true)}</div></div>`;
-  h += `<div class="frow"><div class="lab">Skills</div><div><div class="skillbar"><span>${f.skills.size ? plural(f.skills.size, 'skill') + ' selected' : 'Any skill'}</span><button class="link" data-act="skills-toggle" aria-expanded="${S.skillsOpen}">${S.skillsOpen ? 'Hide skills' : 'Choose skills'}</button></div>
-    ${weakest ? `<p class="weak">Weakest so far: ${esc(weakest[0])} ${accBadge(weakest[1])}</p>` : ''}
-    ${S.skillsOpen && acc.skill.size ? `<p class="acc-key">Percent right so far: <em class="acc low">under 60%</em> <em class="acc mid">60 to 79%</em> <em class="acc high">80% and up</em></p>` : ''}
-    ${S.skillsOpen ? `<div class="skills">${[...doms].map(([d, sk]) => `<div class="dom"><button class="domname" data-act="f-domain" data-v="${esc(d)}" title="Select or clear every skill in ${esc(d)}">${esc(d)}${accBadge(acc.domain.get(d))}</button>${[...sk].map(x => bubble('f-skill', x, x, f.skills.has(x), count('skill', x), false, accBadge(acc.skill.get(x)))).join('')}</div>`).join('')}</div>` : ''}</div></div>
-    <div class="go"><p class="match">${qs.length ? `${plural(qs.length, 'question')} match${qs.length === 1 ? 'es' : ''}` : 'No questions match these filters'}${filtered ? ` <button class="link" data-act="clear-filters">Clear filters</button>` : ''}</p>
-      ${qs.length ? `<div class="modes" role="radiogroup">${bubble('f-mode', 'test', 'Test: answers and score at the end', !study, null, true)}${bubble('f-mode', 'study', 'Study: check each answer as you go', study, null, true)}</div>
-      <div class="opts"><label>Use <input class="num" id="m-count" type="number" min="1" max="${qs.length}" value="${n}"> of them</label>
-        <label class="check"><input type="checkbox" id="m-shuffle" ${S.form.shuffle ? 'checked' : ''}> Shuffle the order</label>
-        ${study ? '' : `<span class="check"><label class="check"><input type="checkbox" id="m-timed" ${S.form.timed ? 'checked' : ''}> Timed</label><label><input class="num" id="m-min" type="number" min="1" value="${mins}" ${S.form.timed ? '' : 'disabled'}> minutes</label></span>`}</div>
-      <button class="pill big" data-act="create">${study ? 'Start studying' : 'Start module'}</button>` : ''}</div></section><aside>`;
-
-  if (S.modules.length) {
+  {
     const rows = S.modules.map(m => {
       const mine = S.attempts.filter(a => a.moduleId === m.id);
-      const open = mine.find(a => !a.finishedAt);
-      const last = mine.filter(a => a.finishedAt).sort((a, b) => b.finishedAt - a.finishedAt)[0];
-      return { m, open, last };
-    }).sort((a, b) => !!b.open - !!a.open || b.m.createdAt - a.m.createdAt);
-    h += `<h2>Your modules</h2>` + rows.map(({ m, open, last }) => {
+      return { m, open: mine.find(a => !a.finishedAt), last: mine.filter(a => a.finishedAt).sort((a, b) => b.finishedAt - a.finishedAt)[0] };
+    }).filter(r => !r.m.auto || r.open).sort((a, b) => !!b.open - !!a.open || b.m.createdAt - a.m.createdAt);
+    if (rows.length) h += `<section class="block"><h2>Your modules</h2><div class="list">${rows.map(({ m, open, last }) => {
       const t = last && tally(last);
-      const state = open ? `in progress, on question ${open.idx + 1}` : !t ? 'not started' : t.n ? `last score ${t.c}/${t.n}` : 'nothing answered last time';
-      return `<div class="item"><div class="name">${esc(m.name)}</div><div class="meta">${plural(m.qids.length, 'question')}, ${m.mode === 'study' ? 'study' : m.seconds ? Math.round(m.seconds / 60) + ' min' : 'untimed'}, ${shortDate(m.createdAt)}</div><div class="meta">${state}</div>
-        <div class="acts"><button class="pill small" data-act="${open ? 'resume' : 'start'}" data-id="${open ? open.id : m.id}">${open ? 'Resume' : !last ? 'Start' : m.mode === 'study' ? 'Study again' : 'Retake'}</button>
-        ${last ? `<button class="link" data-act="results" data-id="${last.id}">Results</button>` : ''}<button class="link" data-act="del-module" data-id="${m.id}">Delete</button></div></div>`;
-    }).join('');
+      const state = open ? `On question ${open.idx + 1} of ${open.qids.length}` : !t ? 'Not started' : t.n ? `Last score ${t.c}/${t.n}` : 'Nothing answered last time';
+      return `<div class="li"><div class="li-main"><div class="li-title">${esc(m.name)}</div><div class="li-meta">${plural(m.qids.length, 'question')}, ${m.mode === 'study' ? 'study' : m.seconds ? Math.round(m.seconds / 60) + ' min test' : 'untimed test'}, ${shortDate(m.createdAt)}. ${state}.</div></div>
+        <div class="li-acts">${last ? `<button class="link" data-act="results" data-id="${last.id}">Results</button>` : ''}<button class="link danger" data-act="del-module" data-id="${m.id}">Delete</button>
+        <button class="btn ${open ? '' : 'ghost'} small" data-act="${open ? 'resume' : 'start'}" data-id="${open ? open.id : m.id}">${open ? 'Resume' : !last ? 'Start' : m.mode === 'study' ? 'Study again' : 'Retake'}</button></div></div>`;
+    }).join('')}</div></section>`;
   }
-  const sources = [...new Set(all.map(q => q.source))];
-  h += `<h2>Files in your bank</h2>` + sources.map(x => `<div class="item file"><div><div class="name" title="${esc(x)}">${esc(x)}</div><div class="meta">${plural(all.filter(q => q.source === x).length, 'question')}</div></div><button class="link" data-act="del-source" data-v="${esc(x)}">Remove</button></div>`).join('') +
-    `<h2>Backup</h2><p class="foot">Your questions, modules and results are saved ${where()}.${backend === 'browser' ? ' Clearing browsing data deletes them, so export a backup now and then.' : ''}</p>
-    <div class="backup"><button class="link" data-act="export" data-v="all">Export everything</button><button class="link" data-act="export" data-v="results">Export results only</button><button class="link" data-act="choose">Restore a backup</button></div>
-    <p class="foot">Everything includes the question images, so the file is large. Results only is small: restore it after adding the same PDFs again.</p></aside></main>` + veil;
   return h;
 }
 // Modules name themselves after the filters that built them, for example "Hard Math, Linear functions".
@@ -597,19 +753,109 @@ function moduleName(qs) {
   const f = S.filter, sec = sectionOf(qs);
   const head = [{ unseen: 'New', missed: 'Still missed', ever: 'Ever missed' }[f.status], f.diff.size ? ['Easy', 'Medium', 'Hard'].filter(d => f.diff.has(d)).join(' and ') : '', sec === 'Mixed' ? 'Both sections' : sec].filter(Boolean).join(' ');
   const skills = [...new Set(qs.map(q => q.skill))];
-  return head + (f.skills.size ? `, ${skills.length === 1 ? skills[0] : plural(skills.length, 'skill')}` : '');
+  return head + (f.skills.size ? `, ${skills.length === 1 ? short(skills[0]) : plural(skills.length, 'skill')}` : '');
 }
 
+// ---------- Mistakes ----------
+function viewMistakes() {
+  const rs = reviewState();
+  const items = [...rs].map(([id, r]) => [S.questions.get(id), r]).filter(([q]) => q);
+  if (!items.length) return `<h1 class="title">Mistakes</h1><p class="lede">Nothing here yet. Every question you get wrong lands here, comes back for review the next day, and clears after two right answers in a row.</p>`;
+  const due = items.filter(([, r]) => r.status === 'due'), later = items.filter(([, r]) => r.status === 'later'), cleared = items.filter(([, r]) => r.status === 'cleared');
+  const open = [...due, ...later];
+  const counts = Object.keys(REASONS).map(k => [k, open.filter(([, r]) => r.why?.reason === k).length]).filter(([, n]) => n);
+  const untagged = open.filter(([, r]) => !r.why?.reason).length;
+  const f = S.mistakeFilter;
+  const show = list => list.filter(([, r]) => !f || (f === 'none' ? !r.why?.reason : r.why?.reason === f));
+  const row = ([q, r]) => `<div class="li mistake ${r.why?.reason ? 'r-' + r.why.reason : ''}">
+      <div class="li-main"><div class="li-title">${esc(short(q.skill))}</div>
+        <div class="li-meta">${esc([q.section, q.difficulty, q.source].filter(Boolean).join(', '))}</div>
+        <div class="li-meta">Missed ${r.wrongs === 1 ? 'once' : `${r.wrongs} times`}, last answered ${shortDate(r.last)}.${r.streak ? ` Right ${r.streak === 1 ? 'once' : 'twice'} since.` : ''}</div>
+        ${r.why ? `<p class="why-note"><mark class="r-${r.why.reason}">${esc(REASONS[r.why.reason] || '')}</mark>${r.why.note ? ` ${esc(r.why.note)}` : ''}</p>` : ''}</div>
+      <div class="li-acts"><span class="when ${r.status}">${r.status === 'due' ? 'Due now' : r.status === 'later' ? `Back ${shortDate(r.due)}` : 'Cleared'}</span>${r.status === 'cleared' ? '' : `<button class="btn ghost small" data-act="practise-one" data-id="${q.id}">Practise</button>`}</div></div>`;
+  let h = `<h1 class="title">Mistakes</h1><p class="lede">${due.length ? `${plural(due.length, 'question')} due for review now` : 'Nothing is due right now'}${later.length ? `, ${later.length} coming back later` : ''}${cleared.length ? `, ${cleared.length} cleared` : ''}.</p>`;
+  if (due.length) h += `<div class="row"><button class="btn big" data-act="retest-due">Review the ${due.length} due now</button></div>`;
+  if (counts.length) {
+    const total = open.length;
+    h += `<section class="block"><h2>Why you missed them</h2><div class="reason-bar" role="img" aria-label="Reasons">${counts.map(([k, n]) => `<i class="r-${k}" style="flex:${n}" title="${REASONS[k]}: ${n}"></i>`).join('')}${untagged ? `<i class="r-none" style="flex:${untagged}" title="No reason noted: ${untagged}"></i>` : ''}</div>
+      <div class="reason-key">${seg('m-filter', [['', 'All', total], ...counts.map(([k, n]) => [k, REASONS[k], n]), ...(untagged ? [['none', 'No reason noted', untagged]] : [])], f || '')}</div></section>`;
+  }
+  if (show(due).length) h += `<section class="block"><h2>Due now</h2><div class="list">${show(due).map(row).join('')}</div></section>`;
+  if (show(later).length) h += `<section class="block"><h2>Coming back later</h2><div class="list">${show(later).sort((a, b) => a[1].due - b[1].due).map(row).join('')}</div></section>`;
+  if (cleared.length && !f) h += `<section class="block"><h2>Cleared</h2>${S.showCleared ? `<div class="list">${cleared.map(row).join('')}</div>` : `<button class="link" data-act="show-cleared">Show ${plural(cleared.length, 'cleared question')}</button>`}</section>`;
+  h += `<p class="fine">In study mode, the app asks why you missed a question right after you check it. Your answer shows up here.</p>`;
+  return h;
+}
+
+// ---------- Skills ----------
+// Skills of a section in the official order, followed by any the bank has that the list does not know.
+function skillTree(sec, qs) {
+  const tree = new Map();
+  for (const [d, sks] of Object.entries(TAXONOMY[sec] || {})) tree.set(d, [...sks]);
+  for (const q of qs) {
+    if (!tree.has(q.domain)) tree.set(q.domain, []);
+    if (!tree.get(q.domain).includes(q.skill)) tree.get(q.domain).push(q.skill);
+  }
+  return [...tree].map(([d, sks]) => [d, sks.filter(k => qs.some(q => q.skill === k))]).filter(([, sks]) => sks.length);
+}
+function viewSkills() {
+  const all = [...S.questions.values()], acc = accuracy(), hist = history(), rs = reviewState();
+  if (!all.length) return `<h1 class="title">Skills</h1><p class="lede">Add questions to your bank and answer a few, and every skill on the test shows up here with how you’re doing.</p>`;
+  const still = all.filter(q => STATUS.missed(hist, q)).length, seen = all.filter(q => hist.has(q.id)).length;
+  const time = S.attempts.reduce((t, a) => t + (a.elapsed || 0), 0);
+  const fig = (v, l) => `<div><dd>${v}</dd><dt>${l}</dt></div>`;
+  if (!S.skillSel || !all.some(q => q.skill === S.skillSel)) S.skillSel = weakSkills(acc)[0]?.[0] || all[0].skill;
+  const tile = k => {
+    const r = acc.skill.get(k), p = r ? pctOf(r) : null, step = p == null ? 'none' : `m${Math.min(4, Math.floor(p / 20))}`;
+    return `<button class="tile ${step}" data-act="skill-sel" data-v="${esc(k)}" aria-pressed="${S.skillSel === k}" title="${esc(k)}"><span class="t-name">${esc(short(k))}</span><span class="t-pc">${p == null ? 'New' : p + '%'}</span><span class="t-n">${r ? r.n + ' answered' : 'not tried'}</span></button>`;
+  };
+  const sections = [...new Set(all.map(q => q.section))].map(sec => {
+    const qs = all.filter(q => q.section === sec), r = acc.section.get(sec);
+    return `<section class="map-sec"><h2>${esc(sec)}<span>${r ? `${pctOf(r)}% right over ${plural(r.n, 'answer')}` : 'No answers yet'}</span></h2>
+      <div class="map">${skillTree(sec, qs).map(([d, sks]) => `<div class="map-dom"><h3>${esc(d)}</h3>${sks.map(tile).join('')}</div>`).join('')}</div></section>`;
+  }).join('');
+  const k = S.skillSel, r = acc.skill.get(k), qs = all.filter(q => q.skill === k);
+  const kSeen = qs.filter(q => hist.has(q.id)).length, kDue = qs.filter(q => rs.get(q.id) && rs.get(q.id).status !== 'cleared').length;
+  const rules = [...new Set(qs.map(q => q.rationale?.rule).filter(Boolean))];
+  const panel = `<aside class="panel" aria-live="polite"><p class="p-dom">${esc(qs[0].domain)}</p><h2>${esc(k)}</h2>
+    ${r ? `<div class="p-big"><b>${pctOf(r)}%</b><span>right, ${r.c} of ${r.n}</span></div><div class="mtr"><i class="${level(pctOf(r))}" style="width:${pctOf(r)}%"></i></div>` : '<div class="p-big"><b>New</b><span>no answers yet</span></div>'}
+    <dl class="p-facts"><div><dt>Seen</dt><dd>${kSeen} of ${qs.length} in your bank</dd></div><div><dt>Mistakes open</dt><dd>${kDue}</dd></div></dl>
+    ${rules.length ? `<h4>Rules from your question sets</h4>${rules.map(t => `<p class="rule">${esc(t)}</p>`).join('')}` : ''}
+    <div class="row"><button class="btn" data-act="study-skill" data-v="${esc(k)}" ${qs.length ? '' : 'disabled'}>Study 5 new</button>${kDue ? `<button class="btn ghost" data-act="study-skill-missed" data-v="${esc(k)}">Review ${kDue} missed</button>` : ''}</div></aside>`;
+  const finished = S.attempts.filter(a => a.finishedAt).sort((a, b) => b.finishedAt - a.finishedAt);
+  return `<h1 class="title">Skills</h1>
+    ${acc.total.n ? `<dl class="figs">${fig(acc.total.n, 'Answers checked')}${fig(pctOf(acc.total) + '%', 'Right overall')}${fig(still, 'Still missed')}${fig(`${seen} of ${all.length}`, 'Bank questions seen')}${fig(fmtDuration(time), 'Time practising')}</dl>` : '<p class="lede">Answer some questions and your accuracy fills in here, skill by skill.</p>'}
+    <div class="map-key"><span>Percent right</span><span class="ramp"><i class="m0"></i><i class="m1"></i><i class="m2"></i><i class="m3"></i><i class="m4"></i></span><span>0 to 100%</span><span class="none-key"></span><span>Not tried</span></div>
+    <div class="skills-layout"><div class="maps">${sections}</div>${panel}</div>
+    ${finished.length ? `<section class="block"><h2>Recent sessions</h2><div class="list">${finished.slice(0, 8).map(a => { const t = tally(a); return `<button class="li li-btn" data-act="results" data-id="${a.id}"><div class="li-main"><div class="li-title">${esc(a.name)}</div><div class="li-meta">${a.mode === 'study' ? 'Study' : 'Test'}, ${shortDate(a.finishedAt)}</div></div><span class="score-s">${t.n ? `${t.c}/${t.n}` : '—'}</span></button>`; }).join('')}</div></section>` : ''}`;
+}
+
+// ---------- Question bank ----------
+function viewBank() {
+  const all = [...S.questions.values()];
+  const sources = [...new Set(all.map(q => q.source))];
+  const by = sec => all.filter(q => q.section === sec).length;
+  return `<h1 class="title">Question bank</h1>
+    <p class="lede">${all.length ? `${plural(all.length, 'question')}: ${by('Reading and Writing')} Reading and Writing, ${by('Math')} Math.` : 'Your bank is empty.'}</p>
+    <button class="drop" data-act="choose"><b>Add questions</b><span>Drop question bank PDFs or JSON question sets here, or click to choose files. A question you already have is updated, not added twice.</span></button>
+    <p class="fine">Get PDFs from the <a href="https://satsuiteeducatorquestionbank.collegeboard.org/" target="_blank" rel="noopener">College Board question bank</a>: pick questions, then export them as a PDF.</p>
+    ${sources.length ? `<section class="block"><h2>Files</h2><div class="list">${sources.map(x => `<div class="li"><div class="li-main"><div class="li-title" title="${esc(x)}">${esc(x)}</div><div class="li-meta">${plural(all.filter(q => q.source === x).length, 'question')}</div></div><div class="li-acts"><button class="link danger" data-act="del-source" data-v="${esc(x)}">Remove</button></div></div>`).join('')}</div></section>` : ''}
+    <section class="block"><h2>Backup</h2><p class="body">Your questions, modules and results are saved ${where()}.${backend === 'browser' ? ' Clearing your browsing data deletes them, so export a backup now and then.' : ''}</p>
+      ${FRAMED ? `<p class="fine">Exporting a backup doesn’t work in this preview, because it can’t save files. Open the app at <a href="https://iamraging123.github.io/module-builder/" target="_blank" rel="noopener">iamraging123.github.io/module-builder</a> to export.</p><div class="row"><button class="link" data-act="choose">Restore a backup</button></div>`
+        : `<div class="row"><button class="btn ghost" data-act="export" data-v="all">Export everything</button><button class="btn ghost" data-act="export" data-v="results">Export results only</button><button class="link" data-act="choose">Restore a backup</button></div>
+      <p class="fine">Everything includes the question images, so the file is large. Results only is small: restore it after adding the same PDFs again.</p>`}</section>`;
+}
+
+// ---------- test mode (Bluebook-style) ----------
 function topBar(a, tools) {
   return `<div class="bb-top"><div class="bb-title">${esc(a.name)}<small>${esc(a.section || '')}</small></div>
     <div class="bb-timer">${S.cur ? `<span id="clock"></span><button data-act="clock">${S.clockHidden ? 'Show' : 'Hide'}</button>` : ''}</div>
-    <div class="bb-tools">${tools || ''}</div></div><div class="bb-dash"></div>`;
+    <div class="bb-tools">${tools || ''}</div></div>`;
 }
 function navGrid(a, cur) {
   return `<div class="grid">${a.qids.map((id, i) => `<button class="cell ${a.answers[id] ? 'done' : ''} ${a.marked[id] ? 'flag' : ''} ${i === cur ? 'cur' : ''}" data-act="goto" data-i="${i}">${i + 1}</button>`).join('')}</div>`;
 }
-const legend = `<div class="legend"><span>▢ Unanswered</span><span style="color:var(--blue)">■ Answered</span><span style="color:var(--red)">■ For review</span></div>`;
-
+const legend = `<div class="legend"><span><i class="lg-open"></i>Unanswered</span><span><i class="lg-done"></i>Answered</span><span><i class="lg-flag"></i>For review</span></div>`;
 function viewTest() {
   const a = S.cur, qid = a.qids[a.idx], q = S.questions.get(qid), n = a.qids.length;
   const ans = a.answers[qid], struck = a.struck[qid] || [];
@@ -621,72 +867,53 @@ function viewTest() {
         ${S.elim ? strikeBtn(L, st) : ''}</div>`;
     }).join('');
   } else {
-    body = `<div class="spr"><input id="spr" maxlength="6" autocomplete="off" value="${esc(ans || '')}">
+    body = `<div class="spr"><input id="spr" maxlength="6" autocomplete="off" value="${esc(ans || '')}" aria-label="Your answer">
       <div class="prev">Answer preview: <span id="sprprev">${esc(ans || '')}</span></div>
       <p class="hint">Enter a whole number, decimal or fraction, such as 3.5 or 7/2. Up to 5 characters, or 6 with a minus sign.</p></div>`;
   }
-  const tools = `${q.section === 'Math' ? mathTools() : ''}<button data-act="exit">Save &amp; Exit</button>`;
+  const tools = `${q.section === 'Math' ? mathTools() : ''}<button data-act="exit">Save and exit</button>`;
   return `<div class="bb">${topBar(a, tools)}
     <div class="bb-body"><div class="pane"><div class="inner"><div class="qbar"><span class="qnum">${a.idx + 1}</span>
-        <button class="mark ${a.marked[qid] ? 'on' : ''}" data-act="mark"><i class="flag"></i>${a.marked[qid] ? 'Marked for Review' : 'Mark for Review'}</button>
+        <button class="mark ${a.marked[qid] ? 'on' : ''}" data-act="mark"><i class="flag"></i>${a.marked[qid] ? 'Marked for review' : 'Mark for review'}</button>
         ${q.type === 'mc' ? crossToggle() : ''}</div>
         <div class="stem">${content(q.stem)}</div>${body}</div></div></div>
-    <div class="bb-dash"></div>
     <div class="bb-bottom"><span></span><button class="bb-nav" data-act="nav">Question ${a.idx + 1} of ${n} ${S.nav ? '▾' : '▴'}</button>
-      <div class="bb-go"><button class="pill ghost" data-act="back" ${a.idx ? '' : 'disabled'}>Back</button><button class="pill" data-act="next">Next</button></div>
-      ${S.nav ? `<div class="pop"><h3>${esc(a.name)}</h3>${legend}${navGrid(a, a.idx)}<div class="foot"><button class="pill ghost" data-act="check">Go to Review Page</button></div></div>` : ''}</div></div>`;
+      <div class="bb-go"><button class="btn ghost" data-act="back" ${a.idx ? '' : 'disabled'}>Back</button><button class="btn" data-act="next">Next</button></div>
+      ${S.nav ? `<div class="pop"><h3>${esc(a.name)}</h3>${legend}${navGrid(a, a.idx)}<div class="foot"><button class="btn ghost" data-act="check">Go to the review page</button></div></div>` : ''}</div></div>`;
 }
 // Math questions get the College Board version of the Desmos calculator (opens in its own tab) and a formula panel.
 const DESMOS = 'https://www.desmos.com/testing/cb-digital-sat/graphing';
 const mathTools = () => `<a class="tool" href="${DESMOS}" target="_blank" rel="noopener" title="Opens the Desmos graphing calculator used on the digital SAT in a new tab">Calculator</a><button class="tool" data-act="ref" aria-expanded="${S.ref}">Reference</button>`;
 // The standard geometry facts given on the test, written out as plain formulas.
 const REFERENCE = [
-  ['Area and circumference', [
-    ['Circle, area', 'A = \u03c0r<sup>2</sup>'],
-    ['Circle, circumference', 'C = 2\u03c0r'],
-    ['Rectangle', 'A = \u2113w'],
-    ['Triangle', 'A = \u00bdbh'],
-  ]],
-  ['Right triangles', [
-    ['Pythagorean theorem', 'c<sup>2</sup> = a<sup>2</sup> + b<sup>2</sup>'],
-    ['30\u00b0-60\u00b0-90\u00b0 sides', 'x, x\u221a3, 2x'],
-    ['45\u00b0-45\u00b0-90\u00b0 sides', 's, s, s\u221a2'],
-  ]],
-  ['Volume', [
-    ['Rectangular box', 'V = \u2113wh'],
-    ['Cylinder', 'V = \u03c0r<sup>2</sup>h'],
-    ['Sphere', 'V = \u2074\u2044\u2083\u03c0r<sup>3</sup>'],
-    ['Cone', 'V = \u2153\u03c0r<sup>2</sup>h'],
-    ['Pyramid', 'V = \u2153\u2113wh'],
-  ]],
-  ['Angles', [
-    ['Degrees of arc in a circle', '360'],
-    ['Radians of arc in a circle', '2\u03c0'],
-    ['Sum of the angles of a triangle', '180\u00b0'],
-  ]],
+  ['Area and circumference', [['Circle, area', 'A = πr<sup>2</sup>'], ['Circle, circumference', 'C = 2πr'], ['Rectangle', 'A = ℓw'], ['Triangle', 'A = ½bh']]],
+  ['Right triangles', [['Pythagorean theorem', 'c<sup>2</sup> = a<sup>2</sup> + b<sup>2</sup>'], ['30°-60°-90° sides', 'x, x√3, 2x'], ['45°-45°-90° sides', 's, s, s√2']]],
+  ['Volume', [['Rectangular box', 'V = ℓwh'], ['Cylinder', 'V = πr<sup>2</sup>h'], ['Sphere', 'V = ⁴⁄₃πr<sup>3</sup>'], ['Cone', 'V = ⅓πr<sup>2</sup>h'], ['Pyramid', 'V = ⅓ℓwh']]],
+  ['Angles', [['Degrees of arc in a circle', '360'], ['Radians of arc in a circle', '2π'], ['Sum of the angles of a triangle', '180°']]],
 ];
 function refSheet() {
   return `<aside class="ref" role="dialog" aria-label="Reference sheet"><div class="ref-head"><h3>Reference</h3><button class="link" data-act="ref">Close</button></div>
     ${REFERENCE.map(([title, rows]) => `<h4>${title}</h4><dl>${rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('')}</dl>`).join('')}
-    <p class="ref-note">In the 30\u00b0-60\u00b0-90\u00b0 triangle the sides are listed opposite 30\u00b0, 60\u00b0 and 90\u00b0. In the 45\u00b0-45\u00b0-90\u00b0 triangle the last side is the hypotenuse.</p></aside>`;
+    <p class="ref-note">In the 30°-60°-90° triangle the sides are listed opposite 30°, 60° and 90°. In the 45°-45°-90° triangle the last side is the hypotenuse.</p></aside>`;
 }
 // Cross-out: the toggle shows a button beside each choice; right-clicking a choice does the same without the toggle.
 const crossToggle = () => `<button class="cross ${S.elim ? 'on' : ''}" data-act="elim" aria-pressed="${S.elim}" title="Show a cross-out button beside each choice. You can also right-click a choice.">Cross out</button>`;
 const strikeBtn = (L, st) => `<button class="strike ${st ? 'undo' : ''}" data-act="strike" data-l="${L}" title="${st ? 'Restore' : 'Cross out'} choice ${L}">${st ? 'Undo' : `<s>${L}</s>`}</button>`;
-// Study mode: one question, check it, see the explanation, move on.
+
+// ---------- study mode: one question, check it, see why, move on ----------
 function viewStudy() {
   const a = S.cur, qid = a.qids[a.idx], q = S.questions.get(qid), n = a.qids.length;
   const v = a.answers[qid], done = !!a.checked[qid], g = done ? grade(q, a) : null, last = a.idx === n - 1;
   const seen = a.qids.filter(id => a.checked[id]), right = seen.filter(id => grade(S.questions.get(id), a) === true).length;
+  const kind = S.modules.find(m => m.id === a.moduleId)?.kinds?.[qid];
   let body;
   if (q.type === 'mc') {
-    body = q.choices.map((c, i) => {
-      const L = 'ABCD'[i];
-      const st = (a.struck[qid] || []).includes(L);
+    body = `<div class="choices">${q.choices.map((c, i) => {
+      const L = 'ABCD'[i], st = (a.struck[qid] || []).includes(L);
       const cls = !done ? (v === L ? 'sel' : '') : L === q.correct ? 'correct' : v === L && g === false ? 'wrong' : v === L ? 'sel' : '';
       // Once checked, a crossed-out choice stays crossed unless it turned out to be the answer.
       return `<div class="choice-row"><button class="choice ${cls} ${st && !(done && L === q.correct) ? 'struck' : ''}" data-act="pick" data-l="${L}" ${done ? 'disabled' : ''}><span class="letter">${L}</span>${content(c)}</button>${S.elim && !done ? strikeBtn(L, st) : ''}</div>`;
-    }).join('');
+    }).join('')}</div>`;
   } else {
     body = `<div class="spr"><input id="spr" maxlength="6" autocomplete="off" value="${esc(v || '')}" ${done ? 'disabled' : ''} aria-label="Your answer">
       <span id="sprprev" hidden></span>${done ? '' : '<p class="hint">Enter a whole number, decimal or fraction, such as 3.5 or 7/2.</p>'}</div>`;
@@ -694,162 +921,126 @@ function viewStudy() {
   let feedback = '';
   if (done) {
     const key = q.correct ? ` The answer is ${esc(q.correct)}.` : '';
-    feedback = `<div class="fb ${g === true ? 'ok' : g === false ? 'bad' : 'pend'}"><p class="fb-head">${g === true ? 'Correct.' : g === false ? `Not quite.${key}` : 'Compare your answer with the explanation.'}</p>
+    const w = a.why?.[qid];
+    feedback = `<div class="fb ${g === true ? 'ok' : g === false ? 'bad' : 'pend'}"><p class="fb-head">${g === true ? 'Right.' : g === false ? `Not this time.${key}` : 'Compare your answer with the explanation.'}</p>
       ${a.qtime?.[qid] ? `<p class="fb-time">You took ${fmtTime(a.qtime[qid])}.</p>` : ''}
-      ${!q.correct ? `${content(q.answerImg)}<div class="selfgrade"><span>Did you get it?</span><button class="btn" data-act="s-self" data-v="1">Yes</button><button class="btn" data-act="s-self" data-v="0">No</button></div>` : ''}
-      ${q.rationale ? `<h4>Explanation</h4>${content(q.rationale)}` : ''}</div>`;
+      ${!q.correct ? `${content(q.answerImg)}<div class="row"><span>Did you get it?</span><button class="btn ghost small" data-act="s-self" data-v="1">Yes</button><button class="btn ghost small" data-act="s-self" data-v="0">No</button></div>` : ''}
+      ${g === false ? `<div class="whybox"><p class="whyq">Why did you miss it?</p><div class="why-opts">${Object.entries(REASONS).map(([k, label]) => `<button class="why-opt r-${k}" aria-pressed="${w?.reason === k}" data-act="s-why" data-v="${k}">${label}</button>`).join('')}</div>
+        <label class="fine" for="why-note">A note for next time (optional)</label><input id="why-note" class="why-note-in" value="${esc(w?.note || '')}" placeholder="What will you look for next time?" autocomplete="off"></div>` : ''}
+      ${q.rationale ? `<div class="expl"><h4>Explanation</h4>${content(q.rationale)}</div>` : ''}</div>`;
   }
   const pct = k => `${100 * k / n}%`;
-  return `<header class="bar"><div class="bar-in"><div class="brand">${esc(a.name)}</div><button class="link" data-act="exit">Save and exit</button><button class="pill ghost" data-act="s-finish">End session</button></div></header>
-    <div class="sprog" title="${right} correct, ${seen.length - right} missed"><i class="r" style="width:${pct(right)}"></i><i class="w" style="width:${pct(seen.length - right)}"></i></div>
-    <main class="study"><p class="s-meta"><b>Question ${a.idx + 1} of ${n}</b><span>${esc([q.skill, q.difficulty].filter(Boolean).join(', '))}</span><span class="s-tally">${right} correct, ${seen.length - right} missed</span></p>
+  return `<div class="focus"><header class="focus-bar"><div class="fb-title">${esc(a.name)}</div><span class="fine">${right} right, ${seen.length - right} missed</span><button class="link" data-act="exit">Save and exit</button><button class="btn ghost small" data-act="s-finish">End session</button></header>
+    <div class="sprog" title="${right} right, ${seen.length - right} missed"><i class="r" style="width:${pct(right)}"></i><i class="w" style="width:${pct(seen.length - right)}"></i></div>
+    <main class="study"><div class="s-meta"><b>Question ${a.idx + 1} of ${n}</b>${kind ? `<span class="kind ${kind}">${KIND_LABEL[kind]}</span>` : ''}<span>${esc([short(q.skill), q.difficulty].filter(Boolean).join(', '))}</span></div>
       <div class="s-tools"><span class="s-clock"><span id="clock"></span><button class="link" data-act="clock">${S.clockHidden ? 'Show timer' : 'Hide timer'}</button></span><span class="s-right">${q.section === 'Math' ? mathTools() : ''}${q.type === 'mc' && !done ? crossToggle() : ''}</span></div>
       <div class="stem">${content(q.stem)}</div>${body}${feedback}
-      <div class="s-acts">${done ? `<button class="pill big" data-act="s-next">${last ? 'See results' : 'Next question'}</button>` : `<button class="pill big" data-act="s-check" ${v ? '' : 'disabled'}>Check answer</button>${last ? '' : '<button class="link" data-act="s-next">Skip for now</button>'}`}
-        ${a.idx ? '<button class="link s-prev" data-act="back">Previous question</button>' : ''}</div></main>`;
+      <div class="s-acts">${done ? `<button class="btn big" data-act="s-next">${last ? 'See how it went' : 'Next question'}</button>` : `<button class="btn big" data-act="s-check" ${v ? '' : 'disabled'}>Check answer</button>${last ? '' : '<button class="link" data-act="s-next">Skip for now</button>'}`}
+        ${a.idx ? '<button class="link s-prev" data-act="back">Previous question</button>' : ''}</div></main></div>`;
 }
 function viewCheck() {
   const a = S.cur, blank = a.qids.filter(id => !a.answers[id]).length;
-  return `<div class="bb">${topBar(a, `<button data-act="exit">Save &amp; Exit</button>`)}
-    <div class="checkpage"><div class="box"><h2>Check Your Work</h2>
-      <p>${blank ? `${plural(blank, 'question')} unanswered. ` : 'Every question is answered. '}Click a number to go back to it, or submit when you are done.</p>
-      <div class="panel">${legend}${navGrid(a, -1)}</div></div></div>
-    <div class="bb-dash"></div>
-    <div class="bb-bottom"><span></span><span></span><div class="bb-go"><button class="pill ghost" data-act="goto" data-i="${a.qids.length - 1}">Back</button><button class="pill" data-act="submit">Submit</button></div></div></div>`;
+  return `<div class="bb">${topBar(a, `<button data-act="exit">Save and exit</button>`)}
+    <div class="checkpage"><div class="box"><h2>Check your work</h2>
+      <p>${blank ? `${plural(blank, 'question')} unanswered. ` : 'Every question is answered. '}Click a number to go back to it, or submit when you’re done.</p>
+      <div class="panel-c">${legend}${navGrid(a, -1)}</div></div></div>
+    <div class="bb-bottom"><span></span><span></span><div class="bb-go"><button class="btn ghost" data-act="goto" data-i="${a.qids.length - 1}">Back</button><button class="btn" data-act="submit">Submit</button></div></div></div>`;
 }
 
+// ---------- results and review ----------
 function breakdown(a, key) {
   const m = new Map();
-  for (const q of attemptQs(a)) {
+  for (const q of counted(a)) {
     const r = m.get(q[key]) || { n: 0, c: 0 };
     r.n++; if (grade(q, a) === true) r.c++;
     m.set(q[key], r);
   }
-  return `<table class="bd">${[...m].map(([k, r]) => `<tr><td>${esc(k || '—')}</td><td class="n">${r.c}/${r.n}</td><td class="b"><div class="meter"><i style="width:${100 * r.c / r.n}%"></i></div></td></tr>`).join('')}</table>`;
+  return `<table class="bd">${[...m].map(([k, r]) => `<tr><td>${esc(short(k) || '—')}</td><td class="n">${r.c}/${r.n}</td><td class="b"><div class="mtr"><i class="${level(pctOf(r))}" style="width:${pctOf(r)}%"></i></div></td></tr>`).join('')}</table>`;
 }
 function verdict(g, v) {
-  if (v == null || v === '') return ['bad', 'Omitted'];
-  return g === true ? ['ok', 'Correct'] : g === false ? ['bad', 'Incorrect'] : ['pend', 'Check'];
-}
-// ---------- stats ----------
-const pctOf = r => Math.round(100 * r.c / r.n);
-const level = p => p < 60 ? 'low' : p < 80 ? 'mid' : 'high';
-function fmtDuration(sec) {
-  const h = Math.floor(sec / 3600), m = Math.round(sec % 3600 / 60);
-  return h ? `${h} h ${m} min` : `${m} min`;
-}
-// Percent right as text plus a thin bar in the same colour; the number carries the meaning, the colour only backs it up.
-function rightCell(r) {
-  if (!r) return '<td class="num muted">\u2014</td>';
-  const p = pctOf(r);
-  return `<td class="num"><span class="rc" title="${r.c} right out of ${r.n}"><em class="acc ${level(p)}">${p}%</em><span class="mtr"><i class="${level(p)}" style="width:${p}%"></i></span></span></td>`;
-}
-// Skills of a section in the official order, followed by any the bank has that the list does not know.
-function skillTree(sec, qs) {
-  const tree = new Map();
-  for (const [d, sks] of Object.entries(TAXONOMY[sec] || {})) tree.set(d, [...sks]);
-  for (const q of qs) {
-    if (!tree.has(q.domain)) tree.set(q.domain, []);
-    if (!tree.get(q.domain).includes(q.skill)) tree.get(q.domain).push(q.skill);
-  }
-  return [...tree].map(([d, sks]) => [d, sks.filter(k => qs.some(q => q.skill === k))]).filter(([, sks]) => sks.length);
-}
-function viewStats() {
-  const all = [...S.questions.values()], acc = accuracy(), hist = history();
-  const bar = appBar(`<button class="pill ghost" data-act="home">Back to start</button>`);
-  if (!acc.total.n) return bar + `<main class="page stats"><h1>Your stats</h1><p class="sub">Nothing here yet. Finish a test module or check some answers in study mode, and your progress shows up on this page.</p></main>`;
-  const still = all.filter(q => STATUS.missed(hist, q)).length;
-  const seen = all.filter(q => hist.has(q.id)).length;
-  const time = S.attempts.reduce((t, a) => t + (a.elapsed || 0), 0);
-  const finished = S.attempts.filter(a => a.finishedAt).sort((a, b) => b.finishedAt - a.finishedAt);
-  const fig = (v, l) => `<div><dd>${v}</dd><dt>${l}</dt></div>`;
-  let h = bar + `<main class="page stats"><h1>Your stats</h1>
-    <dl class="figs">${fig(acc.total.n, 'Answers checked')}${fig(pctOf(acc.total) + '%', 'Right overall')}${fig(still, 'Still missed')}${fig(`${seen} of ${all.length}`, 'Bank questions seen')}${fig(fmtDuration(time), 'Time practising')}${fig(finished.length, 'Sessions finished')}</dl>`;
-
-  // What to study next: weakest skills with enough answers to mean something, then skills never tried.
-  const bankBySkill = new Map();
-  for (const q of all) bankBySkill.set(q.skill, (bankBySkill.get(q.skill) || 0) + 1);
-  const weak = [...acc.skill].filter(([k, r]) => bankBySkill.has(k) && r.n >= 3 && pctOf(r) < 80).sort((x, y) => pctOf(x[1]) - pctOf(y[1]) || y[1].n - x[1].n);
-  const untried = [...bankBySkill.keys()].filter(k => !acc.skill.has(k));
-  const sectionOfSkill = k => all.find(q => q.skill === k).section;
-  const stillIn = k => all.filter(q => q.skill === k && STATUS.missed(hist, q)).length;
-  const next = [
-    ...weak.slice(0, 4).map(([k, r]) => [k, `${pctOf(r)}% right over ${plural(r.n, 'answer')}${stillIn(k) ? `, ${stillIn(k)} still missed` : ''}`, level(pctOf(r))]),
-    ...untried.slice(0, Math.max(1, 5 - Math.min(weak.length, 4))).map(k => [k, `Not tried yet, ${plural(bankBySkill.get(k), 'question')} in your bank`, 'none']),
-  ];
-  if (next.length) {
-    h += `<h2>Study next</h2><div class="next">${next.map(([k, why, lv]) => `<div class="nx"><span class="dot ${lv}" aria-hidden="true"></span><div class="nx-t"><div class="name">${esc(k)}</div><div class="meta">${esc(sectionOfSkill(k))}. ${esc(why)}</div></div><button class="btn" data-act="study-skill" data-v="${esc(k)}">Study 5</button></div>`).join('')}</div>`;
-  }
-
-  for (const sec of [...new Set(all.map(q => q.section))]) {
-    const qs = all.filter(q => q.section === sec), r = acc.section.get(sec);
-    const secStill = qs.filter(q => STATUS.missed(hist, q)).length, secSeen = qs.filter(q => hist.has(q.id)).length;
-    const cells = (list, r2) => {
-      const st = list.filter(q => STATUS.missed(hist, q)).length, sn = list.filter(q => hist.has(q.id)).length;
-      return `<td class="num">${r2 ? r2.n : 0}</td>${rightCell(r2)}<td class="num ${st ? '' : 'muted'}">${st}</td><td class="num">${sn} of ${list.length}</td>`;
-    };
-    h += `<section class="sec"><div class="sec-head"><h2>${esc(sec)}</h2>${secStill ? `<button class="btn" data-act="study-missed" data-v="${esc(sec)}">Study the ${secStill} still missed</button>` : ''}</div>
-      <p class="sub">${r ? `${plural(r.n, 'answer')}, ${pctOf(r)}% right` : 'No answers yet'}. You have seen ${secSeen} of the ${qs.length} questions in your bank for this section.</p>
-      <div class="tw"><table class="st"><thead><tr><th>Skill</th><th class="num">Answered</th><th class="num">Right</th><th class="num">Still missed</th><th class="num">Seen</th><th><span class="vh">Action</span></th></tr></thead><tbody>
-      ${skillTree(sec, qs).map(([d, sks]) => `<tr class="drow"><th scope="row">${esc(d)}</th>${cells(qs.filter(q => q.domain === d), acc.domain.get(d))}<td></td></tr>` +
-        sks.map(k => `<tr><th scope="row" class="sk">${esc(k)}</th>${cells(qs.filter(q => q.skill === k), acc.skill.get(k))}<td class="act"><button class="link" data-act="study-skill" data-v="${esc(k)}">Study</button></td></tr>`).join('')).join('')}
-      </tbody></table></div>
-      <h3>By difficulty</h3><div class="tw"><table class="st diff"><thead><tr><th>Difficulty</th><th class="num">Answered</th><th class="num">Right</th><th class="num">Still missed</th><th class="num">Seen</th></tr></thead><tbody>
-      ${['Easy', 'Medium', 'Hard'].filter(dd => qs.some(q => q.difficulty === dd)).map(dd => `<tr><th scope="row">${dd}</th>${cells(qs.filter(q => q.difficulty === dd), acc.diff.get(`${sec}|${dd}`))}</tr>`).join('')}
-      </tbody></table></div></section>`;
-  }
-
-  if (finished.length) {
-    h += `<h2>Recent sessions</h2><div class="tw"><table class="st"><thead><tr><th>Session</th><th>Date</th><th>Mode</th><th class="num">Score</th></tr></thead><tbody>
-      ${finished.slice(0, 10).map(a => { const t = tally(a); return `<tr><th scope="row"><button class="link" data-act="results" data-id="${a.id}">${esc(a.name)}</button></th><td>${shortDate(a.finishedAt)}</td><td>${a.mode === 'study' ? 'Study' : 'Test'}</td><td class="num">${t.n ? `${t.c}/${t.n}` : '\u2014'}</td></tr>`; }).join('')}
-      </tbody></table></div>`;
-  }
-  return h + `</main>`;
+  if (v == null || v === '') return ['skip', 'Skipped'];
+  return g === true ? ['ok', 'Right'] : g === false ? ['bad', 'Missed'] : ['pend', 'Check'];
 }
 function viewResults() {
   const a = S.rev.attempt, t = tally(a), qs = attemptQs(a);
   const missed = counted(a).filter(q => grade(q, a) !== true).length;
   const mod = S.modules.find(m => m.id === a.moduleId);
   const others = S.attempts.filter(x => x.moduleId === a.moduleId && x.finishedAt).sort((x, y) => y.finishedAt - x.finishedAt);
-  return appBar(`<button class="pill ghost" data-act="home">Back to start</button>`) + `<div class="page">
-    <h1>${esc(a.name)}</h1><p class="sub">${new Date(a.finishedAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}, time used ${fmtTime(a.elapsed)}${a.seconds ? ` of ${fmtTime(a.seconds)}` : ''}</p>
-    <div class="score"><b>${t.c}/${t.n}</b><span>${t.n ? Math.round(100 * t.c / t.n) : 0}% correct${a.mode === 'study' && t.n < qs.length ? `, ${qs.length - t.n} not answered` : ''}${t.p ? `, ${t.p} to check yourself` : ''}</span></div>
-    <div class="create">${mod ? `<button class="btn primary" data-act="start" data-id="${a.moduleId}">${a.mode === 'study' ? 'Study again' : 'Retake'}</button>` : ''}${missed ? `<button class="btn" data-act="retake-missed">Practice the ${missed} missed</button>` : ''}</div>
-    ${others.length > 1 ? `<p class="notice">Attempts: ${others.map(x => { const k = tally(x); return x.id === a.id ? `<b>${k.c}/${k.n}</b>` : `<button class="link" data-act="results" data-id="${x.id}">${k.c}/${k.n}</button>`; }).join(' · ')}</p>` : ''}
-    <h2>By domain</h2>${breakdown(a, 'domain')}<h2>By skill</h2>${breakdown(a, 'skill')}<h2>By difficulty</h2>${breakdown(a, 'difficulty')}
-    <h2>Questions</h2><div class="rows">${qs.map((q, i) => {
+  return `<button class="link back" data-act="go" data-v="${mod?.today ? 'home' : 'practice'}">${mod?.today ? 'Back to Today' : 'Back to Practice'}</button>
+    <h1 class="title">${esc(a.name)}</h1><p class="lede">${new Date(a.finishedAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}, ${fmtDuration(a.elapsed)}${a.seconds ? ` of ${fmtDuration(a.seconds)}` : ''}.</p>
+    <div class="score"><b>${t.c}/${t.n}</b><span>${t.n ? pctOf({ c: t.c, n: t.n }) : 0}% right${a.mode === 'study' && t.n < qs.length ? `, ${qs.length - t.n} skipped` : ''}${t.p ? `, ${t.p} to check yourself` : ''}</span></div>
+    <div class="row">${missed ? `<button class="btn" data-act="retake-missed">Practise the ${missed} missed</button>` : ''}${mod ? `<button class="btn ghost" data-act="start" data-id="${a.moduleId}">${a.mode === 'study' ? 'Study again' : 'Retake'}</button>` : ''}</div>
+    ${others.length > 1 ? `<p class="fine">Earlier attempts: ${others.filter(x => x.id !== a.id).map(x => { const k = tally(x); return `<button class="link" data-act="results" data-id="${x.id}">${k.c}/${k.n} on ${shortDate(x.finishedAt)}</button>`; }).join(', ')}</p>` : ''}
+    <section class="block"><h2>Questions</h2><div class="list">${qs.map((q, i) => {
       const [cls, word] = verdict(grade(q, a), a.answers[q.id]);
-      return `<button class="qrow" data-act="review" data-i="${i}"><span class="no">${i + 1}</span><span class="res ${cls}">${word}</span><span class="grow">${esc(q.skill)}</span><span class="meta">${esc(q.difficulty)}</span></button>`;
-    }).join('')}</div></div>`;
+      return `<button class="li li-btn" data-act="review" data-i="${i}"><span class="qno">${i + 1}</span><span class="res ${cls}">${word}</span><div class="li-main"><div class="li-title">${esc(short(q.skill))}</div><div class="li-meta">${esc([q.section, q.difficulty].filter(Boolean).join(', '))}</div></div></button>`;
+    }).join('')}</div></section>
+    <div class="cols"><section class="block"><h2>By skill</h2>${breakdown(a, 'skill')}</section><section class="block"><h2>By domain</h2>${breakdown(a, 'domain')}</section></div>`;
 }
 function viewReview() {
   const a = S.rev.attempt, qs = attemptQs(a), i = S.rev.idx, q = qs[i];
   const v = a.answers[q.id], g = grade(q, a), [cls, word] = verdict(g, v);
   let body;
   if (q.type === 'mc') {
-    body = q.choices.map((c, k) => {
+    body = `<div class="choices">${q.choices.map((c, k) => {
       const L = 'ABCD'[k];
       return `<div class="choice-row"><button class="choice ${L === q.correct ? 'correct' : v === L && g === false ? 'wrong' : v === L ? 'sel' : ''}" disabled><span class="letter">${L}</span>${content(c)}</button></div>`;
-    }).join('');
+    }).join('')}</div>`;
   } else {
     body = `<p class="kv">Your answer: <b>${v ? esc(v) : '—'}</b></p>${q.correct ? `<p class="kv">Correct answer: <b>${esc(q.correct)}</b></p>` : ''}`;
   }
   const needSelf = !q.correct && v;
-  return `<div class="bb">${topBar(a, `<button data-act="to-results">Back to results</button>`)}
-    <div class="bb-body"><div class="pane"><div class="inner"><div class="qbar"><span class="qnum">${i + 1}</span><span>${esc([q.skill, q.difficulty].filter(Boolean).join(', '))}</span><span class="verdict ${cls}">${word}</span></div>
-        <div class="stem">${content(q.stem)}</div>${body}
-        ${needSelf ? `${content(q.answerImg)}<div class="selfgrade"><span>The answer key could not be read for this one. Did you get it?</span><button class="btn" data-act="self" data-v="1">Yes</button><button class="btn" data-act="self" data-v="0">No</button></div>` : ''}
-        ${q.rationale ? `<div class="expl"><h4>Explanation</h4>${content(q.rationale)}</div>` : ''}</div></div></div>
-    <div class="bb-dash"></div>
-    <div class="bb-bottom"><span></span><span style="font-weight:700">Question ${i + 1} of ${qs.length}</span>
-      <div class="bb-go"><button class="pill ghost" data-act="rev-go" data-d="-1" ${i ? '' : 'disabled'}>Back</button><button class="pill" data-act="rev-go" data-d="1" ${i < qs.length - 1 ? '' : 'disabled'}>Next</button></div></div></div>`;
+  return `<div class="focus"><header class="focus-bar"><div class="fb-title">${esc(a.name)}</div><span class="fine">Question ${i + 1} of ${qs.length}</span><button class="btn ghost small" data-act="to-results">Back to results</button></header>
+    <main class="study"><div class="s-meta"><b class="res ${cls}">${word}</b><span>${esc([short(q.skill), q.difficulty].filter(Boolean).join(', '))}</span></div>
+      <div class="stem">${content(q.stem)}</div>${body}
+      ${needSelf ? `${content(q.answerImg)}<div class="row"><span>The answer key couldn’t be read for this one. Did you get it?</span><button class="btn ghost small" data-act="self" data-v="1">Yes</button><button class="btn ghost small" data-act="self" data-v="0">No</button></div>` : ''}
+      ${q.rationale ? `<div class="expl"><h4>Explanation</h4>${content(q.rationale)}</div>` : ''}
+      <div class="s-acts"><button class="btn ghost" data-act="rev-go" data-d="-1" ${i ? '' : 'disabled'}>Previous</button><button class="btn" data-act="rev-go" data-d="1" ${i < qs.length - 1 ? '' : 'disabled'}>Next</button></div></main></div>`;
+}
+
+// ---------- confirmations ----------
+// An in-page dialog, because the browser's confirm() is blocked when the app runs inside a preview frame.
+function ask(text, ok, danger = false) {
+  return new Promise(resolve => {
+    const box = document.createElement('div');
+    box.className = 'ask';
+    box.innerHTML = `<div class="ask-card" role="alertdialog" aria-modal="true" aria-labelledby="ask-t"><p id="ask-t">${esc(text)}</p><div class="row end"><button class="btn ghost" data-r="0">Cancel</button><button class="btn ${danger ? 'danger' : ''}" data-r="1">${esc(ok)}</button></div></div>`;
+    const done = r => { box.remove(); document.removeEventListener('keydown', key, true); resolve(r); };
+    const key = e => { if (e.key === 'Escape') { e.stopPropagation(); done(false); } };
+    box.addEventListener('click', e => { const b = e.target.closest('[data-r]'); if (b) done(b.dataset.r === '1'); else if (e.target === box) done(false); });
+    document.addEventListener('keydown', key, true);
+    document.body.appendChild(box);
+    box.querySelector('[data-r="1"]').focus();
+  });
 }
 
 // ---------- actions ----------
 function toggle(set, v) { set.has(v) ? set.delete(v) : set.add(v); }
 function resetCounts() { S.form.count = null; S.form.minutes = null; }
+async function studySet(qs, name, kinds) {
+  if (!qs.length) return;
+  await startAttempt(await createModule(qs, name, null, 'study', { auto: true, ...(kinds ? { kinds } : {}) }));
+}
 const A = {
+  go: d => { S.view = d.v; S.anotherSet = false; render(); scrollTo(0, 0); },
+  home: () => A.go({ v: 'home' }),
   choose: () => $('#file').click(),
+  dismiss: () => { S.notice = ''; render(); },
+  export: d => exportBackup(d.v === 'all'),
+
+  // Today
+  'today-n': d => { S.todayN = +d.v; try { localStorage.setItem('mb-today-n', d.v); } catch {} render(); },
+  async 'today-start'() {
+    const plan = S.plan || todayPlan(S.todayN);
+    if (!plan.items.length) return;
+    const kinds = Object.fromEntries(plan.items.map(([q, k]) => [q.id, k]));
+    const m = await createModule(plan.items.map(([q]) => q), `Today, ${shortDate(Date.now())}`, null, 'study', { today: dateKey(), kinds, auto: true });
+    S.anotherSet = false;
+    await startAttempt(m);
+  },
+  'another-set': () => { S.anotherSet = true; render(); },
+
+  // Practice
   'f-section': d => { S.filter.section = d.v; S.filter.skills.clear(); resetCounts(); render(); },
   'f-diff': d => { toggle(S.filter.diff, d.v); resetCounts(); render(); },
   'f-skill': d => { toggle(S.filter.skills, d.v); resetCounts(); render(); },
@@ -859,26 +1050,10 @@ const A = {
     for (const s of skills) allOn ? f.skills.delete(s) : f.skills.add(s);
     resetCounts(); render();
   },
+  'f-status': d => { S.filter.status = d.v; resetCounts(); render(); },
   'f-mode': d => { S.form.mode = d.v; render(); },
-  stats: () => { S.view = 'stats'; render(); scrollTo(0, 0); },
-  // Five questions from one skill, new ones first. Only once every question in the skill has been answered
-  // does it fall back to ones still missed, then ones already right. ("Study the N still missed" covers misses.)
-  async 'study-skill'(d) {
-    const h = history(), qs = [...S.questions.values()].filter(q => q.skill === d.v);
-    const pick = [...shuffle(qs.filter(q => STATUS.unseen(h, q))), ...shuffle(qs.filter(q => STATUS.missed(h, q))), ...shuffle(qs.filter(q => h.get(q.id)?.last === true))].slice(0, 5);
-    if (!pick.length) return;
-    await startAttempt(await createModule(pick, `Study: ${d.v}`, null, 'study'));
-  },
-  async 'study-missed'(d) {
-    const h = history(), qs = [...S.questions.values()].filter(q => q.section === d.v && STATUS.missed(h, q));
-    if (!qs.length) return;
-    await startAttempt(await createModule(qs, `Still missed ${d.v}`, null, 'study'));
-  },
   'skills-toggle': () => { S.skillsOpen = !S.skillsOpen; render(); },
   'clear-filters'() { const f = S.filter; f.section = ''; f.diff.clear(); f.skills.clear(); f.status = 'any'; resetCounts(); render(); },
-  dismiss: () => { S.notice = ''; render(); },
-  export: d => exportBackup(d.v === 'all'),
-  'f-status': d => { S.filter.status = d.v; resetCounts(); render(); },
   async create() {
     let qs = matching();
     if (!qs.length) return;
@@ -894,11 +1069,10 @@ const A = {
   start: d => startAttempt(S.modules.find(m => m.id === d.id)),
   resume: d => openAttempt(S.attempts.find(a => a.id === d.id)),
   results: d => { S.rev = { attempt: S.attempts.find(a => a.id === d.id), idx: null }; S.view = 'results'; render(); scrollTo(0, 0); },
-  home: () => { S.view = 'home'; render(); },
   async 'del-module'(d) {
     const m = S.modules.find(m => m.id === d.id);
-    if (!confirm(`Delete “${m.name}”? The questions stay in the bank and your missed-question history is kept.`)) return;
-    // Finished attempts are kept (hidden) so the missed-question history survives; only an unfinished one goes.
+    if (!await ask(`Delete “${m.name}”? The questions stay in your bank and your results still count toward Mistakes and Skills.`, 'Delete', true)) return;
+    // Finished attempts are kept (hidden) so the history survives; only an unfinished one goes.
     for (const a of S.attempts.filter(a => a.moduleId === m.id && !a.finishedAt)) await del('attempts', a.id);
     await del('modules', m.id);
     S.attempts = S.attempts.filter(a => a.moduleId !== m.id || a.finishedAt);
@@ -907,13 +1081,32 @@ const A = {
   },
   async 'del-source'(d) {
     const qs = [...S.questions.values()].filter(q => q.source === d.v);
-    if (!confirm(`Remove ${plural(qs.length, 'question')} from “${d.v}”? Modules that use them will lose those questions.`)) return;
+    if (!await ask(`Remove ${plural(qs.length, 'question')} from “${d.v}”? Modules that use them lose those questions.`, 'Remove', true)) return;
     for (const q of qs) { await del('questions', q.id); S.questions.delete(q.id); }
     render();
   },
 
+  // Mistakes and Skills
+  'retest-due'() { const rs = reviewState(); const qs = [...S.questions.values()].filter(q => rs.get(q.id)?.status === 'due'); studySet(shuffle(qs), `Review, ${shortDate(Date.now())}`, Object.fromEntries(qs.map(q => [q.id, 'review']))); },
+  'practise-one': d => { const q = S.questions.get(d.id); studySet([q], `Review: ${short(q.skill)}`, { [q.id]: 'review' }); },
+  'm-filter': d => { S.mistakeFilter = d.v; render(); },
+  'show-cleared': () => { S.showCleared = true; render(); },
+  'skill-sel': d => { S.skillSel = d.v; render(); if (innerWidth < 980) $('.panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); },
+  // Five questions from one skill, new ones first, then ones still missed, then ones already right.
+  'study-skill'(d) {
+    const h = history(), qs = [...S.questions.values()].filter(q => q.skill === d.v);
+    const pick = [...shuffle(qs.filter(q => STATUS.unseen(h, q))), ...shuffle(qs.filter(q => STATUS.missed(h, q))), ...shuffle(qs.filter(q => h.get(q.id)?.last === true))].slice(0, 5);
+    studySet(pick, `Study: ${short(d.v)}`, Object.fromEntries(pick.map(q => [q.id, STATUS.unseen(h, q) ? 'new' : 'review'])));
+  },
+  'study-skill-missed'(d) {
+    const rs = reviewState(), qs = [...S.questions.values()].filter(q => q.skill === d.v && rs.get(q.id) && rs.get(q.id).status !== 'cleared');
+    studySet(shuffle(qs), `Review: ${short(d.v)}`, Object.fromEntries(qs.map(q => [q.id, 'review'])));
+  },
+
+  // In a session
   pick(d) {
     const a = S.cur, id = a.qids[a.idx];
+    if (a.checked?.[id]) return;
     a.answers[id] = a.answers[id] === d.l ? '' : d.l;
     a.struck[id] = (a.struck[id] || []).filter(l => l !== d.l);
     put('attempts', a); render();
@@ -932,16 +1125,24 @@ const A = {
     const a = S.cur, id = a.qids[a.idx];
     if (!a.answers[id] || a.checked[id]) return;
     a.checked[id] = true;
+    (a.checkedAt ||= {})[id] = Date.now();
+    put('attempts', a); render();
+  },
+  's-why'(d) {
+    const a = S.cur, id = a.qids[a.idx], w = (a.why ||= {})[id] || {};
+    a.why[id] = { reason: w.reason === d.v ? '' : d.v, note: $('#why-note')?.value.trim() || w.note || '' };
     put('attempts', a); render();
   },
   's-next'() {
     const a = S.cur;
+    saveWhyNote();
     if (a.idx < a.qids.length - 1) { a.idx++; put('attempts', a); render(); scrollTo(0, 0); }
     else A['s-finish']();
   },
-  's-finish'() {
+  async 's-finish'() {
     const a = S.cur, left = a.qids.filter(id => !a.checked[id]).length;
-    if (left && !confirm(`${plural(left, 'question')} not answered yet. End the session and see your results? Use “Save and exit” instead if you want to come back to it.`)) return;
+    saveWhyNote();
+    if (left && !await ask(`${plural(left, 'question')} not answered yet. End the session and see your results? Use “Save and exit” instead to come back to it later.`, 'End session')) return;
     submit();
   },
   's-self'(d) { const a = S.cur; a.self[a.qids[a.idx]] = d.v === '1'; put('attempts', a); render(); },
@@ -949,26 +1150,34 @@ const A = {
   clock: () => { S.clockHidden = !S.clockHidden; render(); },
   nav: () => { S.nav = !S.nav; render(); },
   goto(d) { S.cur.idx = +d.i; S.nav = false; S.view = 'test'; render(); },
-  back() { if (S.cur.idx) { S.cur.idx--; S.nav = false; render(); if (S.view === 'study') scrollTo(0, 0); } },
+  back() { saveWhyNote(); if (S.cur.idx) { S.cur.idx--; S.nav = false; render(); if (S.view === 'study') scrollTo(0, 0); } },
   next() { const a = S.cur; S.nav = false; if (a.idx < a.qids.length - 1) a.idx++; else S.view = 'check'; render(); },
   check: () => { S.nav = false; S.view = 'check'; render(); },
-  submit() {
+  async submit() {
     const blank = S.cur.qids.filter(id => !S.cur.answers[id]).length;
-    if (blank && !confirm(`${plural(blank, 'question')} unanswered. Submit anyway?`)) return;
+    if (blank && !await ask(`${plural(blank, 'question')} unanswered. Submit anyway?`, 'Submit')) return;
     submit();
   },
-  exit: leaveTest,
+  exit() { saveWhyNote(); leaveTest(); },
 
-  review(d) { S.rev.idx = +d.i; S.view = 'review'; render(); },
-  'rev-go'(d) { S.rev.idx += +d.d; render(); },
+  // Results
+  review(d) { S.rev.idx = +d.i; S.view = 'review'; render(); scrollTo(0, 0); },
+  'rev-go'(d) { S.rev.idx += +d.d; render(); scrollTo(0, 0); },
   'to-results': () => { S.view = 'results'; render(); },
   async self(d) { const a = S.rev.attempt; a.self[attemptQs(a)[S.rev.idx].id] = d.v === '1'; await put('attempts', a); render(); },
   async 'retake-missed'() {
     const a = S.rev.attempt, qs = counted(a).filter(q => grade(q, a) !== true);
-    const m = await createModule(qs, `${a.name.replace(/(, missed| — missed)$/, '')}, missed`, a.seconds ? defaultSeconds(qs) : null, a.mode);
+    const m = await createModule(qs, `${a.name.replace(/(, missed| — missed)$/, '')}, missed`, a.seconds ? defaultSeconds(qs) : null, a.mode, a.mode === 'study' ? { kinds: Object.fromEntries(qs.map(q => [q.id, 'review'])) } : {});
     await startAttempt(m);
   },
 };
+// The note under "Why did you miss it?" is kept when moving on.
+function saveWhyNote() {
+  const a = S.cur, el = $('#why-note');
+  if (!a || !el) return;
+  const id = a.qids[a.idx], w = (a.why ||= {})[id] || {};
+  if (el.value.trim() !== (w.note || '')) { a.why[id] = { reason: w.reason || '', note: el.value.trim() }; put('attempts', a); }
+}
 
 document.addEventListener('click', e => {
   const el = e.target.closest('[data-act]');
@@ -995,12 +1204,13 @@ document.addEventListener('input', e => {
 document.addEventListener('change', e => {
   if (e.target.id === 'file') { handleFiles([...e.target.files]); e.target.value = ''; }
 });
-// PDFs can be dropped anywhere on the start page.
-document.addEventListener('dragover', e => { if (S.view === 'home' && !S.offline) { e.preventDefault(); document.body.classList.add('dragging'); } });
+// Files can be dropped anywhere outside a session.
+const canDrop = () => SHELL.includes(S.view) && !S.offline;
+document.addEventListener('dragover', e => { if (canDrop()) { e.preventDefault(); document.body.classList.add('dragging'); } });
 document.addEventListener('dragleave', e => { if (!e.relatedTarget) document.body.classList.remove('dragging'); });
 document.addEventListener('drop', e => {
   document.body.classList.remove('dragging');
-  if (S.view !== 'home' || S.offline) return;
+  if (!canDrop()) return;
   e.preventDefault();
   handleFiles([...e.dataTransfer.files].filter(f => /\.(pdf|json|jsonl)$/i.test(f.name)));
 });
@@ -1014,7 +1224,8 @@ document.addEventListener('contextmenu', e => {
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && S.ref) { S.ref = false; render(); } });
 // Study mode keys: A-D pick a choice, Enter checks the answer and then moves on.
 document.addEventListener('keydown', e => {
-  if (S.view !== 'study' || !S.cur || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (S.view !== 'study' || !S.cur || e.ctrlKey || e.metaKey || e.altKey || document.querySelector('.ask')) return;
+  if (e.target.id === 'why-note') { if (e.key === 'Enter') { e.preventDefault(); A['s-next'](); } return; }
   const a = S.cur, id = a.qids[a.idx], q = S.questions.get(id);
   if (e.key === 'Enter') { e.preventDefault(); a.checked[id] ? A['s-next']() : A['s-check'](); }
   else if (q.type === 'mc' && !a.checked[id] && /^[a-d]$/i.test(e.key)) { const L = e.key.toUpperCase(); if (a.answers[id] !== L) A.pick({ l: L }); }
@@ -1031,7 +1242,7 @@ async function handleFiles(files) {
       const isJson = /\.json$/i.test(f.name);
       if (!isJson && !window.pdfjsLib) throw new Error('the PDF reader could not be loaded; check your internet connection and reload');
       const set = isJson ? await importJsonSet(f) : null;
-      const qs = set ? set.questions : await importPdf(f, (i, n) => { S.busy = `Reading ${f.name} — question ${i} of ${n}`; const p = $('#status-text'); if (p && S.view === 'home') p.textContent = S.busy; else render(); });
+      const qs = set ? set.questions : await importPdf(f, (i, n) => { S.busy = `Reading ${f.name} — question ${i} of ${n}`; const p = $('#status-text'); if (p) p.textContent = S.busy; else render(); });
       if (!qs.length) { msgs.push(`${f.name}: no questions found. Is it a question bank export?`); S.noticeErr = true; continue; }
       let fresh = 0;
       for (const [i, q] of qs.entries()) {
