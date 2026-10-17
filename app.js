@@ -1218,7 +1218,8 @@ async function migrateBrowserStore() {
   render();
   let st = null;
   try {
-    st = LOCAL || location.protocol.startsWith('http') && !new URLSearchParams(location.search).has('browser') ? await api('GET', '/api/state') : null;
+    // Only a copy running on this computer has the local server to ask.
+    st = LOCAL ? await api('GET', '/api/state') : null;
   } catch (err) {
     if (LOCAL) { console.error(err); S.offline = true; }
   }
