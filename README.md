@@ -12,7 +12,7 @@ Practice for the digital SAT and PSAT with questions from the College Board ques
    - **Get started**: step-by-step instructions, ticked off as you go, and how your progress is saved.
    - **Practice**: build your own module by section, difficulty, skill or history, as a timed test in the style of Bluebook or as a study session.
    - **Mistakes**: every question you got wrong. A miss comes back the next day, then 3 days later, and clears after two right answers in a row. After a miss you can note why (didn't know the rule, fell for a trap, misread, rushed, careless).
-   - **Skills**: every skill on the test, coloured by how often you get it right, with buttons to drill one.
+   - **Skills**: every skill on the test, colored by how often you get it right, with buttons to drill one.
    - **Question bank**: your files, plus backup and restore.
 
 Math questions link to the Desmos calculator used on the test and include a formula reference.

@@ -644,11 +644,11 @@ function viewStart() {
         <p class="fine">Full practice tests from Bluebook can\u2019t be imported. Question bank exports are the way in.</p>`)}
       ${step(n > 0, 'Add the PDF here', `<p>Drop the PDF anywhere on this page, or press Add questions. It takes about a second per question. Adding the same questions again updates them instead of making copies.</p>
         ${n ? `<p class="fine">Your bank has ${plural(n, 'question')}.</p>` : ''}`, `<button class="btn" data-act="choose">Add questions</button>`)}
-      ${step(answered, 'Practise', `<p>In Practice, filter by section, difficulty, skill or history, then pick a mode:</p>
+      ${step(answered, 'Practice', `<p>In Practice, filter by section, difficulty, skill or history, then pick a mode:</p>
         <ul><li><b>Test</b>: timed like the real thing, with your score and answers at the end.</li><li><b>Study</b>: no clock pressure. Check each answer as you go and read the explanation.</li></ul>
         <p class="fine">Math questions have the Desmos calculator used on the test and a formula reference.</p>`, n ? `<button class="btn ghost" data-act="go" data-v="practice">Go to Practice</button>` : '')}
       ${step(missed, 'Review your mistakes', `<p>Every question you miss goes to Mistakes. It comes back the next day, then 3 days later, and clears once you get it right twice in a row. In study mode you can note why you missed it, so you can spot patterns like falling for trap answers.</p>`, missed ? `<button class="btn ghost" data-act="go" data-v="mistakes">Go to Mistakes</button>` : '')}
-      ${step(answered, 'Watch your skills', `<p>Skills colours every skill on the test by how often you get it right. Click one to see your numbers and drill it with five new questions.</p>`, answered ? `<button class="btn ghost" data-act="go" data-v="skills">Go to Skills</button>` : '')}
+      ${step(answered, 'Watch your skills', `<p>Skills colors every skill on the test by how often you get it right. Click one to see your numbers and drill it with five new questions.</p>`, answered ? `<button class="btn ghost" data-act="go" data-v="skills">Go to Skills</button>` : '')}
       ${step(false, 'Keep your progress safe', saveHelp(), '')}
     </ol>${backupControls()}`;
 }
@@ -723,7 +723,7 @@ function viewMistakes() {
         <div class="li-meta">${esc([q.section, q.difficulty, q.source].filter(Boolean).join(', '))}</div>
         <div class="li-meta">Missed ${r.wrongs === 1 ? 'once' : `${r.wrongs} times`}, last answered ${shortDate(r.last)}.${r.streak ? ` Right ${r.streak === 1 ? 'once' : 'twice'} since.` : ''}</div>
         ${r.why ? `<p class="why-note"><mark class="r-${r.why.reason}">${esc(REASONS[r.why.reason] || '')}</mark>${r.why.note ? ` ${esc(r.why.note)}` : ''}</p>` : ''}</div>
-      <div class="li-acts"><span class="when ${r.status}">${r.status === 'due' ? 'Due now' : r.status === 'later' ? `Back ${shortDate(r.due)}` : 'Cleared'}</span>${r.status === 'cleared' ? '' : `<button class="btn ghost small" data-act="practise-one" data-id="${q.id}">Practise</button>`}</div></div>`;
+      <div class="li-acts"><span class="when ${r.status}">${r.status === 'due' ? 'Due now' : r.status === 'later' ? `Back ${shortDate(r.due)}` : 'Cleared'}</span>${r.status === 'cleared' ? '' : `<button class="btn ghost small" data-act="practise-one" data-id="${q.id}">Practice</button>`}</div></div>`;
   let h = `<h1 class="title">Mistakes</h1><p class="lede">${due.length ? `${plural(due.length, 'question')} due for review now` : 'Nothing is due right now'}${later.length ? `, ${later.length} coming back later` : ''}${cleared.length ? `, ${cleared.length} cleared` : ''}.</p>`;
   if (due.length) h += `<div class="row"><button class="btn big" data-act="retest-due">Review the ${due.length} due now</button></div>`;
   if (counts.length) {
@@ -775,7 +775,7 @@ function viewSkills() {
     <div class="row"><button class="btn" data-act="study-skill" data-v="${esc(k)}" ${qs.length ? '' : 'disabled'}>Study 5 new</button>${kDue ? `<button class="btn ghost" data-act="study-skill-missed" data-v="${esc(k)}">Review ${kDue} missed</button>` : ''}</div></aside>`;
   const finished = S.attempts.filter(a => a.finishedAt).sort((a, b) => b.finishedAt - a.finishedAt);
   return `<h1 class="title">Skills</h1>
-    ${acc.total.n ? `<dl class="figs">${fig(acc.total.n, 'Answers checked')}${fig(pctOf(acc.total) + '%', 'Right overall')}${fig(still, 'Still missed')}${fig(`${seen} of ${all.length}`, 'Bank questions seen')}${fig(fmtDuration(time), 'Time practising')}</dl>` : '<p class="lede">Answer some questions and your accuracy fills in here, skill by skill.</p>'}
+    ${acc.total.n ? `<dl class="figs">${fig(acc.total.n, 'Answers checked')}${fig(pctOf(acc.total) + '%', 'Right overall')}${fig(still, 'Still missed')}${fig(`${seen} of ${all.length}`, 'Bank questions seen')}${fig(fmtDuration(time), 'Time practicing')}</dl>` : '<p class="lede">Answer some questions and your accuracy fills in here, skill by skill.</p>'}
     <div class="map-key"><span>Percent right</span><span class="ramp"><i class="m0"></i><i class="m1"></i><i class="m2"></i><i class="m3"></i><i class="m4"></i></span><span>0 to 100%</span><span class="none-key"></span><span>Not tried</span></div>
     <div class="skills-layout"><div class="maps">${sections}</div>${panel}</div>
     ${finished.length ? `<section class="block"><h2>Recent sessions</h2><div class="list">${finished.slice(0, 8).map(a => { const t = tally(a); return `<button class="li li-btn" data-act="results" data-id="${a.id}"><div class="li-main"><div class="li-title">${esc(a.name)}</div><div class="li-meta">${a.mode === 'study' ? 'Study' : 'Test'}, ${shortDate(a.finishedAt)}</div></div><span class="score-s">${t.n ? `${t.c}/${t.n}` : '—'}</span></button>`; }).join('')}</div></section>` : ''}`;
@@ -917,7 +917,7 @@ function viewResults() {
   return `<button class="link back" data-act="go" data-v="practice">Back to Practice</button>
     <h1 class="title">${esc(a.name)}</h1><p class="lede">${new Date(a.finishedAt).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}, ${fmtDuration(a.elapsed)}${a.seconds ? ` of ${fmtDuration(a.seconds)}` : ''}.</p>
     <div class="score"><b>${t.c}/${t.n}</b><span>${t.n ? pctOf({ c: t.c, n: t.n }) : 0}% right${a.mode === 'study' && t.n < qs.length ? `, ${qs.length - t.n} skipped` : ''}${t.p ? `, ${t.p} to check yourself` : ''}</span></div>
-    <div class="row">${missed ? `<button class="btn" data-act="retake-missed">Practise the ${missed} missed</button>` : ''}${mod ? `<button class="btn ghost" data-act="start" data-id="${a.moduleId}">${a.mode === 'study' ? 'Study again' : 'Retake'}</button>` : ''}</div>
+    <div class="row">${missed ? `<button class="btn" data-act="retake-missed">Practice the ${missed} missed</button>` : ''}${mod ? `<button class="btn ghost" data-act="start" data-id="${a.moduleId}">${a.mode === 'study' ? 'Study again' : 'Retake'}</button>` : ''}</div>
     ${others.length > 1 ? `<p class="fine">Earlier attempts: ${others.filter(x => x.id !== a.id).map(x => { const k = tally(x); return `<button class="link" data-act="results" data-id="${x.id}">${k.c}/${k.n} on ${shortDate(x.finishedAt)}</button>`; }).join(', ')}</p>` : ''}
     <section class="block"><h2>Questions</h2><div class="list">${qs.map((q, i) => {
       const [cls, word] = verdict(grade(q, a), a.answers[q.id]);
