@@ -641,8 +641,8 @@ function viewStart() {
     <p class="lede">Module Builder turns SAT and PSAT questions from the College Board question bank into timed practice tests and study sessions, then brings back what you got wrong until you\u2019ve got it.</p>
     <ol class="gs-list">
       ${step(n > 0, 'Get questions from the College Board', `<p>Open the <a href="https://satsuiteeducatorquestionbank.collegeboard.org/" target="_blank" rel="noopener">College Board question bank</a>. It\u2019s free and needs no account.</p>
-        <ul><li>Choose the test (SAT, PSAT/NMSQT and PSAT 10, or PSAT 8/9), a section, and the domains and skills you want.</li><li>Tick the questions you want, or select them all.</li><li>Export them, and save the PDF.</li></ul>
-        <p class="fine">Full practice tests from Bluebook can\u2019t be imported. Question bank exports are the way in.</p>`)}
+        <ul><li>Choose the test (SAT, PSAT/NMSQT and PSAT 10, or PSAT 8/9), a section, and the domains and skills you want.</li><li>Tick the questions you want, or select them all.</li><li>Press <b>Export</b>, choose <b>With correct answers and explanations</b>, then press <b>Download PDF</b>.</li></ul>
+        <p class="fine">The other two export options leave out the answers, so Module Builder couldn’t grade those questions. Full practice tests from Bluebook can\u2019t be imported. Question bank exports are the way in.</p>`)}
       ${step(n > 0, 'Add the PDF here', `<p>Drop the PDF anywhere on this page, or press Add questions. It takes about a second per question. Adding the same questions again updates them instead of making copies.</p>
         ${n ? `<p class="fine">Your bank has ${plural(n, 'question')}.</p>` : ''}`, `<button class="btn" data-act="choose">Add questions</button>`)}
       ${step(answered, 'Practice', `<p>In Practice, filter by section, difficulty, skill or history, then pick a mode:</p>
@@ -790,7 +790,7 @@ function viewBank() {
   return `<h1 class="title">Question bank</h1>
     <p class="lede">${all.length ? `${plural(all.length, 'question')}: ${by('Reading and Writing')} Reading and Writing, ${by('Math')} Math.` : 'Your bank is empty.'}</p>
     <button class="drop" data-act="choose"><b>Add questions</b><span>Drop question bank PDFs or JSON question sets here, or click to choose files. A question you already have is updated, not added twice.</span></button>
-    <p class="fine">Get PDFs from the <a href="https://satsuiteeducatorquestionbank.collegeboard.org/" target="_blank" rel="noopener">College Board question bank</a>: pick questions, then export them as a PDF.</p>
+    <p class="fine">Get PDFs from the <a href="https://satsuiteeducatorquestionbank.collegeboard.org/" target="_blank" rel="noopener">College Board question bank</a>: pick questions, press Export, choose “With correct answers and explanations”, then Download PDF.</p>
     ${sources.length ? `<section class="block"><h2>Files</h2><div class="list">${sources.map(x => `<div class="li"><div class="li-main"><div class="li-title" title="${esc(x)}">${esc(x)}</div><div class="li-meta">${plural(all.filter(q => q.source === x).length, 'question')}</div></div><div class="li-acts"><button class="link danger" data-act="del-source" data-v="${esc(x)}">Remove</button></div></div>`).join('')}</div></section>` : ''}
     <section class="block"><h2>Backup</h2><div class="body">${saveHelp()}</div>${backupControls()}</section>`;
 }

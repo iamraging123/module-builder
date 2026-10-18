@@ -6,7 +6,7 @@ Practice for the digital SAT and PSAT with questions from the College Board ques
 
 ## How it works
 
-1. Export a set of questions as a PDF from the [College Board question bank](https://satsuiteeducatorquestionbank.collegeboard.org/). It is free and needs no account.
+1. In the [College Board question bank](https://satsuiteeducatorquestionbank.collegeboard.org/) (free, no account), select questions, press **Export**, choose **With correct answers and explanations**, and press **Download PDF**.
 2. Open Module Builder and drop the PDF on the page, or press **Add questions**. Each question is cut out of the PDF along with its answer and explanation.
 3. Study from five places:
    - **Get started**: step-by-step instructions, ticked off as you go, and how your progress is saved.
