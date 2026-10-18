@@ -108,7 +108,11 @@ p.fine { margin: 14px 0 0; }
 .side-foot { margin-top: auto; display: grid; gap: 10px; padding: 0 10px; font-size: 13.5px; color: var(--muted); }
 .credit { font-size: 12.5px; color: var(--faint); text-decoration: none; justify-self: start; }
 .credit:hover { color: var(--ink); text-decoration: underline; }
-.credit-end { margin: 48px 0 0; padding-top: 18px; border-top: 1px solid var(--line); }
+.foot-links { display: grid; gap: 3px; margin-top: 4px; }
+.fb-link { font-size: 13.5px; color: var(--muted); text-decoration: none; justify-self: start; }
+.fb-link:hover { color: var(--ink); text-decoration: underline; }
+.credit-end { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px; margin: 48px 0 0; padding-top: 18px; border-top: 1px solid var(--line); }
+.credit-end .credit { margin-left: auto; }
 @media (min-width: 821px) { .credit-end { display: none; } }
 .main { padding-block: 40px 96px; padding-left: max(24px, env(safe-area-inset-left, 0px)); padding-right: max(24px, env(safe-area-inset-right, 0px)); max-width: 980px; width: 100%; }
 .status { display: flex; gap: 14px; align-items: baseline; padding: 10px 14px; margin-bottom: 22px; border-radius: 10px; background: var(--surface); box-shadow: inset 0 0 0 1px var(--line); font-size: 14.5px; }

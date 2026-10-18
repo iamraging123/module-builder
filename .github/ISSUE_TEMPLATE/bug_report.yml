@@ -1,0 +1,35 @@
+name: Report an issue
+description: Something in Module Builder doesn't work the way it should.
+title: "Issue: "
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What went wrong?
+      placeholder: For example, a question imported without its answer choices.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How can it be repeated?
+      description: The steps that lead to the problem, as far as you remember them.
+      placeholder: |
+        1. Added a question bank PDF with 40 Math questions
+        2. Started a study session
+        3. ...
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+  - type: input
+    id: question
+    attributes:
+      label: Question ID (if it's about a specific question)
+      description: Shown in the College Board question bank, for example 3e035ab3. Please give the ID instead of attaching the PDF.
+  - type: input
+    id: environment
+    attributes:
+      label: Browser and setup
+      description: Filled in automatically when you use the button in the app.

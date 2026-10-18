@@ -578,6 +578,12 @@ const ICONS = {
 };
 const icon = k => `<svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true">${ICONS[k]}</svg>`;
 const CREDIT = `<a class="credit" href="https://github.com/iamraging123" target="_blank" rel="noopener">Designed by Luka Gruev</a>`;
+// Feedback goes to GitHub issues. The problem form gets the browser and setup filled in, which the person sees before sending.
+const REPO = 'https://github.com/iamraging123/module-builder';
+function feedbackLinks() {
+  const env = `${backend === 'browser' ? 'Saved in the browser' : 'Saved in the data folder'}${FRAMED ? ', in a Claude preview' : ''}, ${plural(S.questions.size, 'question')} in the bank, ${navigator.userAgent}`;
+  return `<a class="fb-link" href="${REPO}/issues/new?template=bug_report.yml&environment=${encodeURIComponent(env)}" target="_blank" rel="noopener">Report an issue</a><a class="fb-link" href="${REPO}/issues/new?template=feature_request.yml" target="_blank" rel="noopener">Request a feature</a>`;
+}
 const NAV = [['home', 'Get started'], ['practice', 'Practice'], ['mistakes', 'Mistakes'], ['skills', 'Skills'], ['bank', 'Question bank']];
 function shell(main) {
   const due = [...reviewState().values()].filter(r => r.status === 'due').length;
@@ -585,7 +591,7 @@ function shell(main) {
   const nav = NAV.map(([v, label]) => `<button class="nav-i" data-act="go" data-v="${v}" ${here === v ? 'aria-current="page"' : ''}>${icon(v)}<span>${label}</span>${v === 'mistakes' && due ? `<em class="badge" title="${due} due for review">${due}</em>` : ''}</button>`).join('');
   const status = S.busy || S.notice ? `<div class="status ${!S.busy && S.noticeErr ? 'err' : ''}" role="status"><span id="status-text">${esc(S.busy || S.notice)}</span>${S.busy ? '' : '<button class="link" data-act="dismiss">Dismiss</button>'}</div>` : '';
   return `<div class="shell"><nav class="side" aria-label="Main"><div class="brand">Module Builder</div><div class="nav">${nav}</div>
-      <div class="side-foot"><span>${S.questions.size ? plural(S.questions.size, 'question') + ' in your bank' : 'Your bank is empty'}</span><button class="btn ghost small" data-act="choose" ${S.busy ? 'disabled' : ''}>Add questions</button>${CREDIT}</div></nav>
+      <div class="side-foot"><span>${S.questions.size ? plural(S.questions.size, 'question') + ' in your bank' : 'Your bank is empty'}</span><button class="btn ghost small" data-act="choose" ${S.busy ? 'disabled' : ''}>Add questions</button><div class="foot-links">${feedbackLinks()}</div>${CREDIT}</div></nav>
     <main class="main">${status}${main}</main></div><div class="dropveil" aria-hidden="true">Drop to add these questions to your bank</div>`;
 }
 const shortDate = t => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
@@ -651,7 +657,7 @@ function viewStart() {
       ${step(missed, 'Review your mistakes', `<p>Every question you miss goes to Mistakes. It comes back the next day, then 3 days later, and clears once you get it right twice in a row. In study mode you can note why you missed it, so you can spot patterns like falling for trap answers.</p>`, missed ? `<button class="btn ghost" data-act="go" data-v="mistakes">Go to Mistakes</button>` : '')}
       ${step(answered, 'Watch your skills', `<p>Skills colors every skill on the test by how often you get it right. Click one to see your numbers and drill it with five new questions.</p>`, answered ? `<button class="btn ghost" data-act="go" data-v="skills">Go to Skills</button>` : '')}
       ${step(false, 'Keep your progress safe', saveHelp(), '')}
-    </ol>${backupControls()}<p class="credit-end">${CREDIT}</p>`;
+    </ol>${backupControls()}<p class="credit-end">${feedbackLinks()}${CREDIT}</p>`;
 }
 
 // ---------- Practice ----------
