@@ -1389,7 +1389,7 @@ async function importJsonSet(file) {
 // marker file behind, so the other devices delete it too. There is no server: Google gives the page an access
 // token for an hour, and a new one takes a click (browsers only open the Google window after a click).
 // The OAuth client ID from Google Cloud goes here. Without one, signing in is not offered.
-const GOOGLE_CLIENT_ID = '';
+const GOOGLE_CLIENT_ID = '548353294594-dmf5g7imbda0qm1bop5hef0k03mb0s4q.apps.googleusercontent.com';
 const GAPI = 'https://www.googleapis.com';
 const DRIVE_OK = !!GOOGLE_CLIENT_ID && !FRAMED;
 const PREFIX = { questions: 'q', modules: 'm', attempts: 'a' }, STORE_OF = { q: 'questions', m: 'modules', a: 'attempts' };

@@ -19,7 +19,11 @@ Math questions link to the Desmos calculator used on the test and include a form
 
 ## Your data
 
-Nothing is uploaded and there is no account. The PDFs are read in your browser, and your questions, modules and results save by themselves after every answer, in your browser on your device. Another browser or computer won't see them, and a private window doesn't keep them. Clearing your browsing data deletes them, so use **Export everything** or **Export results only** under **Question bank** now and then, and **Restore a backup** to bring them back or move to another computer.
+The PDFs are read in your browser, and your questions, modules and results save by themselves after every answer, in your browser on your device. Another browser or computer won't see them, and a private window doesn't keep them.
+
+To use them on more than one computer, press **Sign in with Google** under **Question bank**. Your progress then syncs to a hidden app folder in your own Google Drive, which Module Builder can see and nobody else can, and signing in with the same account elsewhere brings it over. **Remove from Google Drive** deletes that copy. Google's sign-in lasts an hour, so after that the next click in the app opens a short Google window to renew it.
+
+Without signing in, nothing is uploaded. Clearing your browsing data deletes your progress, so use **Export everything** or **Export results only** under **Question bank** now and then, and **Restore a backup** to bring it back or move to another computer.
 
 This site does not include any test questions; you bring your own exports.
 
