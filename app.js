@@ -591,6 +591,9 @@ const ICONS = {
   bank: '<path d="M3 6.5l7-3.5 7 3.5-7 3.5z"/><path d="M3 10l7 3.5 7-3.5M3 13.5l7 3.5 7-3.5"/>',
 };
 const icon = k => `<svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true">${ICONS[k]}</svg>`;
+// The mark: a question page with one line under the marker, in the theme's own colours.
+const LOGO = '<svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="var(--ink)"/><rect x="8" y="5.5" width="16" height="21" rx="2.5" fill="var(--surface)"/><rect x="11" y="10" width="10" height="2" rx="1" fill="var(--ink)"/><rect x="10" y="14.5" width="12" height="4" rx="1.2" fill="var(--marker)"/><rect x="11" y="15.5" width="8" height="2" rx="1" fill="#1b1d21"/><rect x="11" y="21" width="6" height="2" rx="1" fill="var(--ink)"/></svg>';
+const BRAND = `${LOGO}<span>Module Builder</span>`;
 const CREDIT = `<a class="credit" href="https://github.com/iamraging123" target="_blank" rel="noopener">Designed by Luka Gruev</a>`;
 // Feedback goes to GitHub issues. The problem form gets the browser and setup filled in, which the person sees before sending.
 const REPO = 'https://github.com/iamraging123/module-builder';
@@ -604,9 +607,9 @@ function shell(main) {
   const here = S.view === 'results' ? 'practice' : S.view;
   const nav = NAV.map(([v, label]) => `<button class="nav-i" data-act="go" data-v="${v}" ${here === v ? 'aria-current="page"' : ''}>${icon(v)}<span>${label}</span>${v === 'mistakes' && due ? `<em class="badge" title="${due} due for review">${due}</em>` : ''}</button>`).join('');
   const status = S.busy || S.notice ? `<div class="status ${!S.busy && S.noticeErr ? 'err' : ''}" role="status"><span id="status-text">${esc(S.busy || S.notice)}</span>${S.busy ? '' : '<button class="link" data-act="dismiss">Dismiss</button>'}</div>` : '';
-  return `<div class="shell"><nav class="side" aria-label="Main"><div class="brand">Module Builder</div>${accountChip()}<div class="nav">${nav}</div>
+  return `<div class="shell"><nav class="side" aria-label="Main"><div class="brand">${BRAND}</div>${accountChip()}<div class="nav">${nav}</div>
       <div class="side-foot"><span>${S.questions.size ? plural(S.questions.size, 'question') + ' in your bank' : 'Your bank is empty'}</span><button class="btn ghost small" data-act="choose" ${S.busy ? 'disabled' : ''}>Add questions</button><div class="foot-links">${feedbackLinks()}</div>${CREDIT}</div></nav>
-    <main class="main">${DRIVE_OK ? `<header class="topbar"><span class="brand">Module Builder</span>${accountChip()}</header>` : ''}${status}${main}</main></div><div class="dropveil" aria-hidden="true">Drop to add these questions to your bank</div>`;
+    <main class="main">${DRIVE_OK ? `<header class="topbar"><span class="brand">${BRAND}</span>${accountChip()}</header>` : ''}${status}${main}</main></div><div class="dropveil" aria-hidden="true">Drop to add these questions to your bank</div>`;
 }
 const shortDate = t => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 const longDate = (t = Date.now()) => new Date(t).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
