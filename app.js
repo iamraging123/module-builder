@@ -594,7 +594,7 @@ const CREDIT = `<a class="credit" href="https://github.com/iamraging123" target=
 const REPO = 'https://github.com/iamraging123/module-builder';
 function feedbackLinks() {
   const env = `${backend === 'browser' ? 'Saved in the browser' : 'Saved in the data folder'}${FRAMED ? ', in a Claude preview' : ''}, ${plural(S.questions.size, 'question')} in the bank, ${navigator.userAgent}`;
-  return `<a class="fb-link" href="${REPO}/issues/new?template=bug_report.yml&environment=${encodeURIComponent(env)}" target="_blank" rel="noopener">Report an issue</a><a class="fb-link" href="${REPO}/issues/new?template=feature_request.yml" target="_blank" rel="noopener">Request a feature</a>`;
+  return `<a class="fb-link" href="${REPO}/issues/new?template=bug_report.yml&environment=${encodeURIComponent(env)}" target="_blank" rel="noopener">Report an issue</a><a class="fb-link" href="${REPO}/issues/new?template=feature_request.yml" target="_blank" rel="noopener">Request a feature</a><a class="fb-link" href="privacy.html" target="_blank" rel="noopener">Privacy and terms</a>`;
 }
 const NAV = [['home', 'Get started'], ['practice', 'Practice'], ['mistakes', 'Mistakes'], ['skills', 'Skills'], ['bank', 'Question bank']];
 function shell(main) {
