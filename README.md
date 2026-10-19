@@ -21,7 +21,7 @@ Math questions link to the Desmos calculator used on the test and include a form
 
 The PDFs are read in your browser, and your questions, modules and results save by themselves after every answer, in your browser on your device. Another browser or computer won't see them, and a private window doesn't keep them.
 
-To use them on more than one computer, press **Sign in with Google** under **Question bank**. Your progress then syncs to a hidden app folder in your own Google Drive, which Module Builder can see and nobody else can, and signing in with the same account elsewhere brings it over. **Remove from Google Drive** deletes that copy. Google's sign-in lasts an hour, so after that the next click in the app opens a short Google window to renew it.
+To use them on more than one computer, press **Sign in** at the top of the sidebar (top right on phones). Your progress then syncs to a hidden app folder in your own Google Drive, which only you and Module Builder can see, and signing in with the same account elsewhere brings it over. Each Google account gets its own space in the browser, so people sharing a computer don't see each other's progress, and signing out offers to remove yours from that browser. The **Account** page shows the sync status, and **Delete my data** removes the Drive copy. Google's sign-in lasts an hour, so after that the next click in the app opens a short Google window to renew it.
 
 Without signing in, nothing is uploaded. Clearing your browsing data deletes your progress, so use **Export everything** or **Export results only** under **Question bank** now and then, and **Restore a backup** to bring it back or move to another computer.
 

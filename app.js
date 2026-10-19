@@ -43,10 +43,11 @@ let backend = 'server';
 // Inside a preview frame (a Claude artifact) the browser blocks file downloads, so backup export is unavailable there.
 const FRAMED = (() => { try { return window.top !== window.self; } catch { return true; } })();
 const where = () => backend === 'browser' ? 'in this browser' : 'in the data folder next to this app';
-let bdbp;
+// In the browser, each space (guest, or one per Google account) is its own database; see "accounts" below.
+let SPACE_DB = 'module-builder-browser', bdbp;
 function browserDb() {
   return bdbp ??= new Promise((res, rej) => {
-    const r = indexedDB.open('module-builder-browser', 1);
+    const r = indexedDB.open(SPACE_DB, 1);
     r.onupgradeneeded = () => { for (const s of ['questions', 'modules', 'attempts']) r.result.createObjectStore(s, { keyPath: 'id' }); };
     r.onsuccess = () => res(r.result);
     r.onerror = () => rej(r.error);
@@ -295,8 +296,7 @@ async function buildQuestion(pages, source) {
     o.fillStyle = '#fff'; o.fillRect(0, 0, out.width, out.height);
     let dy = pad;
     for (const [a, b] of segs) { o.drawImage(cv, xl, a, xmax - xl + 1, b - a, pad, dy, xmax - xl + 1, b - a); dy += b - a; }
-    const blob = await new Promise(r => out.toBlob(r, 'image/png'));
-    return { blob, w: out.width, h: out.height };
+    return { blob: await imageBlob(out), w: out.width, h: out.height };
   }
 
   const endL = iC >= 0 ? lines[iC] : iR >= 0 ? lines[iR] : null;
@@ -502,12 +502,14 @@ async function submit() {
   S.cur = null; S.rev = { attempt: a, idx: null };
   S.view = 'results';
   render();
+  afterSession();
 }
 async function leaveTest() {
   clearInterval(tick);
   if (S.cur) await put('attempts', S.cur);
   S.cur = null; S.view = 'home';
   render();
+  afterSession();
 }
 
 // ---------- review schedule ----------
@@ -570,9 +572,9 @@ function img(c) {
   if (!c) return '';
   return `<img src="${c.url}" alt="" width="${c.w}" height="${c.h}" style="width:${Math.round(c.w / SCALE * ZOOM)}px">`;
 }
-const SHELL = ['home', 'practice', 'mistakes', 'skills', 'bank', 'results'];
+const SHELL = ['home', 'practice', 'mistakes', 'skills', 'bank', 'results', 'account'];
 function render() {
-  const views = { home: viewStart, practice: viewPractice, mistakes: viewMistakes, skills: viewSkills, bank: viewBank, results: viewResults, test: viewTest, study: viewStudy, check: viewCheck, review: viewReview };
+  const views = { account: viewAccount, home: viewStart, practice: viewPractice, mistakes: viewMistakes, skills: viewSkills, bank: viewBank, results: viewResults, test: viewTest, study: viewStudy, check: viewCheck, review: viewReview };
   const onMath = (S.view === 'test' || S.view === 'study') && S.cur && S.questions.get(S.cur.qids[S.cur.idx])?.section === 'Math';
   const html = views[S.view]();
   $('#app').innerHTML = SHELL.includes(S.view) ? shell(html) : html + (S.ref && onMath ? refSheet() : '');
@@ -602,9 +604,9 @@ function shell(main) {
   const here = S.view === 'results' ? 'practice' : S.view;
   const nav = NAV.map(([v, label]) => `<button class="nav-i" data-act="go" data-v="${v}" ${here === v ? 'aria-current="page"' : ''}>${icon(v)}<span>${label}</span>${v === 'mistakes' && due ? `<em class="badge" title="${due} due for review">${due}</em>` : ''}</button>`).join('');
   const status = S.busy || S.notice ? `<div class="status ${!S.busy && S.noticeErr ? 'err' : ''}" role="status"><span id="status-text">${esc(S.busy || S.notice)}</span>${S.busy ? '' : '<button class="link" data-act="dismiss">Dismiss</button>'}</div>` : '';
-  return `<div class="shell"><nav class="side" aria-label="Main"><div class="brand">Module Builder</div><div class="nav">${nav}</div>
-      <div class="side-foot"><span>${S.questions.size ? plural(S.questions.size, 'question') + ' in your bank' : 'Your bank is empty'}</span>${syncLine()}<button class="btn ghost small" data-act="choose" ${S.busy ? 'disabled' : ''}>Add questions</button><div class="foot-links">${feedbackLinks()}</div>${CREDIT}</div></nav>
-    <main class="main">${status}${main}</main></div><div class="dropveil" aria-hidden="true">Drop to add these questions to your bank</div>`;
+  return `<div class="shell"><nav class="side" aria-label="Main"><div class="brand">Module Builder</div>${accountChip()}<div class="nav">${nav}</div>
+      <div class="side-foot"><span>${S.questions.size ? plural(S.questions.size, 'question') + ' in your bank' : 'Your bank is empty'}</span><button class="btn ghost small" data-act="choose" ${S.busy ? 'disabled' : ''}>Add questions</button><div class="foot-links">${feedbackLinks()}</div>${CREDIT}</div></nav>
+    <main class="main">${DRIVE_OK ? `<header class="topbar"><span class="brand">Module Builder</span>${accountChip()}</header>` : ''}${status}${main}</main></div><div class="dropveil" aria-hidden="true">Drop to add these questions to your bank</div>`;
 }
 const shortDate = t => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 const longDate = (t = Date.now()) => new Date(t).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
@@ -641,11 +643,11 @@ function fmtDuration(sec) {
 const KIND_LABEL = { review: 'Review', weak: 'Weakest skill', new: 'New' };
 // How progress is kept, and the backup controls. Shared by Get started and Question bank.
 function saveHelp() {
-  if (backend === 'server') return `<p>Your progress saves by itself after every answer, in the data folder next to this app. To back it up or move it to another computer, copy that folder.</p>${syncPanel()}`;
-  if (SY.on) return `<p>Your progress saves by itself after every answer, in this browser, and syncs to your Google Drive.</p>${syncPanel()}`;
-  return `<p>Your progress saves by itself after every answer, in this browser on this device. ${DRIVE_OK ? 'Unless you sign in with Google, nothing is uploaded' : 'There\u2019s no account and nothing is uploaded'}, so:</p>
-    <ul><li>Another browser or another computer won\u2019t see it.</li><li>Clearing your browsing data deletes it, and a private window doesn\u2019t keep it.</li></ul>
-    <p>${DRIVE_OK ? 'Sign in with Google below, or export a backup now and then and restore it on the other computer.' : 'Export a backup now and then. To move to another computer, restore that file there.'}</p>${syncPanel()}`;
+  if (SY.user) return `<p>Your progress saves by itself after every answer, ${backend === 'server' ? 'in the data folder next to this app' : 'in this browser'}, and syncs to the Google Drive of ${esc(SY.user.email)}.</p><div class="row"><button class="btn ghost" data-act="go" data-v="account">Account and sync</button></div>`;
+  if (backend === 'server') return `<p>Your progress saves by itself after every answer, in the data folder next to this app. To back it up or move it to another computer, copy that folder${DRIVE_OK ? ', or sign in with Google to sync it' : ''}.</p>`;
+  return `<p>Your progress saves by itself after every answer, in this browser on this device. ${DRIVE_OK ? 'Unless you sign in with Google, nothing is uploaded' : 'There’s no account and nothing is uploaded'}, so:</p>
+    <ul><li>Another browser or another computer won’t see it.</li><li>Clearing your browsing data deletes it, and a private window doesn’t keep it.</li></ul>
+    <p>${DRIVE_OK ? 'Sign in with Google to keep it in your Google Drive, or export a backup now and then and restore it on the other computer.' : 'Export a backup now and then. To move to another computer, restore that file there.'}</p>${DRIVE_OK ? '<div class="row"><button class="btn" data-act="drive-on">Sign in with Google</button></div>' : ''}`;
 }
 function backupControls() {
   if (FRAMED) return `<p class="fine">Exporting a backup doesn\u2019t work in this preview, because it can\u2019t save files. Open the app at <a href="https://iamraging123.github.io/module-builder/" target="_blank" rel="noopener">iamraging123.github.io/module-builder</a> to export.</p><div class="row"><button class="link" data-act="choose">Restore a backup</button></div>`;
@@ -659,6 +661,10 @@ function viewStart() {
   return `<h1 class="title">Get started</h1>
     <p class="lede">Module Builder turns SAT and PSAT questions from the College Board question bank into timed practice tests and study sessions, then brings back what you got wrong until you\u2019ve got it.</p>
     <ol class="gs-list">
+      ${DRIVE_OK ? step(!!SY.user || !!LS.get('mb-guest-ok'), 'Choose where your progress saves', SY.user
+        ? `<p>Signed in as ${esc(SY.user.email)}. Your progress saves to your Google Drive, so you can pick it up on any computer.</p>`
+        : `<p>Sign in with Google to keep your progress in your own Google Drive and pick it up on any computer. Or use Module Builder without an account, and your progress stays in this browser.</p>`,
+        SY.user ? '' : `<button class="btn" data-act="drive-on">Sign in with Google</button>${LS.get('mb-guest-ok') ? '' : '<button class="link" data-act="guest-ok">Continue without an account</button>'}`) : ''}
       ${step(n > 0, 'Get questions from the College Board', `<p>Open the <a href="https://satsuiteeducatorquestionbank.collegeboard.org/" target="_blank" rel="noopener">College Board question bank</a>. It\u2019s free and needs no account.</p>
         <ul><li>Choose the test (SAT, PSAT/NMSQT and PSAT 10, or PSAT 8/9), a section, and the domains and skills you want.</li><li>Tick the questions you want, or select them all.</li><li>Press <b>Export</b>, choose <b>With correct answers and explanations</b>, then press <b>Download PDF</b>.</li></ul>
         <p class="fine">The other two export options leave out the answers, so Module Builder couldn’t grade those questions. Full practice tests from Bluebook can\u2019t be imported. Question bank exports are the way in.</p>`)}
@@ -669,7 +675,7 @@ function viewStart() {
         <p class="fine">Math questions have the Desmos calculator used on the test and a formula reference.</p>`, n ? `<button class="btn ghost" data-act="go" data-v="practice">Go to Practice</button>` : '')}
       ${step(missed, 'Review your mistakes', `<p>Every question you miss goes to Mistakes. It comes back the next day, then 3 days later, and clears once you get it right twice in a row. In study mode you can note why you missed it, so you can spot patterns like falling for trap answers.</p>`, missed ? `<button class="btn ghost" data-act="go" data-v="mistakes">Go to Mistakes</button>` : '')}
       ${step(answered, 'Watch your skills', `<p>Skills colors every skill on the test by how often you get it right. Click one to see your numbers and drill it with five new questions.</p>`, answered ? `<button class="btn ghost" data-act="go" data-v="skills">Go to Skills</button>` : '')}
-      ${step(SY.on, 'Keep your progress safe', saveHelp(), '')}
+      ${DRIVE_OK ? '' : step(false, 'Keep your progress safe', saveHelp(), '')}
     </ol>${backupControls()}<p class="credit-end">${feedbackLinks()}${CREDIT}</p>`;
 }
 
@@ -968,19 +974,22 @@ function viewReview() {
 
 // ---------- confirmations ----------
 // An in-page dialog, because the browser's confirm() is blocked when the app runs inside a preview frame.
-function ask(text, ok, danger = false) {
+// choose() offers several answers, the first being the main one, and resolves to its value, or null for Cancel.
+function choose(text, options) {
   return new Promise(resolve => {
     const box = document.createElement('div');
     box.className = 'ask';
-    box.innerHTML = `<div class="ask-card" role="alertdialog" aria-modal="true" aria-labelledby="ask-t"><p id="ask-t">${esc(text)}</p><div class="row end"><button class="btn ghost" data-r="0">Cancel</button><button class="btn ${danger ? 'danger' : ''}" data-r="1">${esc(ok)}</button></div></div>`;
-    const done = r => { box.remove(); document.removeEventListener('keydown', key, true); resolve(r); };
-    const key = e => { if (e.key === 'Escape') { e.stopPropagation(); done(false); } };
-    box.addEventListener('click', e => { const b = e.target.closest('[data-r]'); if (b) done(b.dataset.r === '1'); else if (e.target === box) done(false); });
+    const btns = options.map(([, label, cls], i) => `<button class="btn ${i ? 'ghost' : ''} ${cls || ''}" data-r="${i}">${esc(label)}</button>`).reverse().join('');
+    box.innerHTML = `<div class="ask-card" role="alertdialog" aria-modal="true" aria-labelledby="ask-t"><p id="ask-t">${esc(text)}</p><div class="row end"><button class="btn ghost" data-r="-1">Cancel</button>${btns}</div></div>`;
+    const done = r => { box.remove(); document.removeEventListener('keydown', key, true); resolve(r < 0 ? null : options[r][0]); };
+    const key = e => { if (e.key === 'Escape') { e.stopPropagation(); done(-1); } };
+    box.addEventListener('click', e => { const b = e.target.closest('[data-r]'); if (b) done(+b.dataset.r); else if (e.target === box) done(-1); });
     document.addEventListener('keydown', key, true);
     document.body.appendChild(box);
-    box.querySelector('[data-r="1"]').focus();
+    box.querySelector('[data-r="0"]').focus();
   });
 }
+const ask = (text, ok, danger = false) => choose(text, [[true, ok, danger ? 'danger' : '']]).then(v => v === true);
 
 // ---------- actions ----------
 function toggle(set, v) { set.has(v) ? set.delete(v) : set.add(v); }
@@ -996,36 +1005,12 @@ const A = {
   dismiss: () => { S.notice = ''; render(); },
   export: d => exportBackup(d.v === 'all'),
 
-  // Google Drive sync
-  async 'drive-on'() {
-    try { await getToken(true); }
-    catch (err) { S.notice = `Signing in with Google did not finish: ${err.message}.`; S.noticeErr = true; return render(); }
-    SY.on = true; LS.set('mb-drive', '1');
-    try { SY.email = (await (await gfetch('/drive/v3/about?fields=user(emailAddress)')).json()).user.emailAddress; LS.set('mb-drive-email', SY.email); } catch {}
-    S.notice = 'Signed in. Your progress now syncs with your Google Drive.'; S.noticeErr = false;
-    render();
-    syncNow(true);
-  },
+  // Account and Google Drive sync
+  'drive-on': () => signIn(),
   'drive-now': () => tokenOk() ? syncNow(true) : resumeSync(),
-  async 'drive-off'() {
-    if (!await ask('Sign out of Google on this device? Your progress stays in this browser and in your Google Drive, but stops syncing until you sign in again.', 'Sign out')) return;
-    signOutDrive(); render();
-  },
-  async 'drive-wipe'() {
-    if (!await ask('Delete the copy of your progress in your Google Drive and sign out? Everything on this device stays. Sign out on your other devices first, or they will upload their copy again.', 'Delete from Drive', true)) return;
-    try {
-      if (!tokenOk()) await getToken(false);
-      await SY.running;
-      const files = [...(await driveList()).values()];
-      S.busy = 'Deleting your data from Google Drive'; render();
-      await pool(files, f => gfetch(`/drive/v3/files/${f.id}`, { method: 'DELETE' }).catch(err => { if (!/404/.test(err.message)) throw err; }), 'Deleting');
-      signOutDrive();
-      S.notice = 'Your data was deleted from Google Drive, and this device is signed out.'; S.noticeErr = false;
-    } catch (err) {
-      S.notice = `Could not delete everything from Google Drive (${err.message}). Try again.`; S.noticeErr = true;
-    }
-    S.busy = ''; render();
-  },
+  'drive-off': () => signOut(),
+  'drive-wipe': () => deleteAccountData(),
+  'guest-ok': () => { LS.set('mb-guest-ok', '1'); render(); },
 
   // Practice
   'f-section': d => { S.filter.section = d.v; S.filter.skills.clear(); resetCounts(); render(); },
@@ -1257,13 +1242,64 @@ async function handleFiles(files) {
   render();
 }
 
+// ---------- image format ----------
+// Question images are kept as lossless WebP where the browser can write it (Chrome and Edge): the same pixels at
+// about a quarter of a PNG's size, which matters most when syncing. Other browsers keep PNG.
+let webpP;
+function losslessWebp() {
+  return webpP ??= (async () => {
+    try {
+      const c = document.createElement('canvas'); c.width = c.height = 8;
+      const g = c.getContext('2d');
+      for (let i = 0; i < 64; i++) { g.fillStyle = `rgb(${i * 4},${255 - i * 3},${(i * 37) % 256})`; g.fillRect(i % 8, i >> 3, 1, 1); }
+      const b = await new Promise(r => c.toBlob(r, 'image/webp', 1));
+      if (b?.type !== 'image/webp') return false;
+      const im = await createImageBitmap(b), k = document.createElement('canvas'); k.width = k.height = 8;
+      const x = k.getContext('2d'); x.drawImage(im, 0, 0);
+      const want = g.getImageData(0, 0, 8, 8).data, got = x.getImageData(0, 0, 8, 8).data;
+      return want.every((v, i) => v === got[i]);
+    } catch { return false; }
+  })();
+}
+async function imageBlob(canvas) {
+  if (await losslessWebp()) {
+    const b = await new Promise(r => canvas.toBlob(r, 'image/webp', 1));
+    if (b?.type === 'image/webp') return b;
+  }
+  return new Promise(r => canvas.toBlob(r, 'image/png'));
+}
+// A PNG from before WebP, rewritten as WebP if that comes out smaller. Anything else comes back as it is.
+async function shrinkImage(blob) {
+  if (blob.type !== 'image/png' || !await losslessWebp()) return blob;
+  try {
+    const im = await createImageBitmap(blob), c = document.createElement('canvas');
+    c.width = im.width; c.height = im.height;
+    c.getContext('2d').drawImage(im, 0, 0); im.close?.();
+    const b = await imageBlob(c);
+    return b.size < blob.size ? b : blob;
+  } catch { return blob; }
+}
+
 // ---------- backup files ----------
 // A backup is JSON Lines: a header line, then one line per question, module and attempt. One record per line keeps
 // both writing and reading streamable, so a bank of hundreds of question images never has to sit in one string.
 async function packQuestion(q) {
   if (q.kind === 'text') return q;
-  const enc = async c => c && { w: c.w, h: c.h, data: await toDataUrl(c.blob || await (await fetch(c.url)).blob()) };
-  return { ...q, stem: await enc(q.stem), answerImg: await enc(q.answerImg), rationale: await enc(q.rationale), choices: await Promise.all(q.choices.map(enc)) };
+  let smaller = false;
+  const enc = async c => {
+    if (!c) return c;
+    const orig = c.blob || await (await fetch(c.url)).blob(), blob = await shrinkImage(orig);
+    if (blob !== orig) smaller = true;
+    return { w: c.w, h: c.h, blob };
+  };
+  const p = { ...q, stem: await enc(q.stem), answerImg: await enc(q.answerImg), rationale: await enc(q.rationale), choices: await Promise.all(q.choices.map(enc)) };
+  // In the browser the smaller images replace the stored ones, so each question is converted only once.
+  if (smaller && backend === 'browser' && S.questions.get(q.id) === q) {
+    for (const c of Object.values(cropsOf(q))) if (c?.url?.startsWith('blob:')) URL.revokeObjectURL(c.url);
+    S.questions.set(q.id, await saveQuestion(structuredClone(p), true));
+  }
+  const data = async c => c && { w: c.w, h: c.h, data: await toDataUrl(c.blob) };
+  return { ...p, stem: await data(p.stem), answerImg: await data(p.answerImg), rationale: await data(p.rationale), choices: await Promise.all(p.choices.map(data)) };
 }
 async function writeBackup(withQuestions, write) {
   await write(JSON.stringify({ app: 'module-builder', version: 2, contents: withQuestions ? 'everything' : 'results', exportedAt: new Date().toISOString() }) + '\n');
@@ -1382,25 +1418,33 @@ async function importJsonSet(file) {
   return { title: info.title || file.name.replace(/\.json$/i, ''), questions };
 }
 
-// ---------- Google Drive sync ----------
-// Signed in with Google, every question, module and session is also kept as one file in a hidden app folder of
-// the person's own Drive (the drive.appdata scope lets the app see only the files it made). Each file is stamped
+// ---------- accounts and Google Drive sync ----------
+// Signing in with Google is optional. A signed-in account gets its own space in this browser (its own IndexedDB
+// database), so people sharing a computer don't see each other's progress; without an account the app uses the
+// guest space. Run with server.py there is one space, the data folder.
+// Each question, module and session of an account is also kept as one file in a hidden app folder of the
+// person's own Drive (the drive.appdata scope lets the app see only the files it made). Each file is stamped
 // with the time of its last change, and a sync keeps the newer side of every record. A deletion leaves an empty
 // marker file behind, so the other devices delete it too. There is no server: Google gives the page an access
 // token for an hour, and a new one takes a click (browsers only open the Google window after a click).
-// The OAuth client ID from Google Cloud goes here. Without one, signing in is not offered.
 const GOOGLE_CLIENT_ID = '548353294594-dmf5g7imbda0qm1bop5hef0k03mb0s4q.apps.googleusercontent.com';
 const GAPI = 'https://www.googleapis.com';
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
 const DRIVE_OK = !!GOOGLE_CLIENT_ID && !FRAMED;
 const PREFIX = { questions: 'q', modules: 'm', attempts: 'a' }, STORE_OF = { q: 'questions', m: 'modules', a: 'attempts' };
-const SY = { on: false, token: '', exp: 0, email: '', ids: new Map(), running: null, again: false, full: false, timer: 0, msg: '', err: '', autoTried: false };
-// The journal holds, per record, the time of the version this device has, and whether it still needs uploading.
-let J = {};
-const jKey = () => `mb-sync-${backend}`;
+const SY = { on: false, user: null, token: '', exp: 0, ids: new Map(), usage: null, running: null, again: false, full: false, timer: 0, msg: '', err: '', last: 0, bulk: false, autoTried: false };
 // Site storage can be blocked, and then even reading it throws.
 function store_(kind) { return { get: k => { try { return kind().getItem(k); } catch { return null; } }, set: (k, v) => { try { v == null ? kind().removeItem(k) : kind().setItem(k, v); } catch {} } }; }
 const LS = store_(() => localStorage), SS = store_(() => sessionStorage);
+// Accounts with a space in this browser: Google user id -> { db, name, first, email, photo }.
+function accounts() { try { return JSON.parse(LS.get('mb-accounts') || '{}'); } catch { return {}; } }
+const saveAccounts = all => LS.set('mb-accounts', JSON.stringify(all));
+const guestDb = () => LS.get('mb-guest-db') || 'module-builder-browser';
+// The journal holds, per record, the time of the version this space has, and whether it still needs uploading.
+let J = {};
+const jKey = (db = SPACE_DB) => backend === 'server' ? 'mb-sync-server' : `mb-sync-${db}`;
 const saveJournal = () => LS.set(jKey(), JSON.stringify(J));
+function loadJournal() { try { J = JSON.parse(LS.get(jKey()) || '{}'); } catch { J = {}; } }
 function touched(store, id, gone) {
   if (!DRIVE_OK) return;
   J[`${PREFIX[store]}-${id}`] = gone ? { t: Date.now(), up: 1, gone: 1 } : { t: Date.now(), up: 1 };
@@ -1408,7 +1452,37 @@ function touched(store, id, gone) {
   if (SY.on && !SY.timer) SY.timer = setTimeout(() => { SY.timer = 0; syncNow(false); }, 8000);
 }
 const tokenOk = () => !!SY.token && Date.now() < SY.exp - 60e3;
+const pendingCount = () => Object.values(J).filter(j => j.up).length;
 
+// ----- spaces -----
+async function readSpace() {
+  if (backend === 'server') return api('GET', '/api/state');
+  return { questions: await idb('questions', 'readonly', o => o.getAll()), modules: await idb('modules', 'readonly', o => o.getAll()), attempts: await idb('attempts', 'readonly', o => o.getAll()) };
+}
+function applyState(st) {
+  for (const q of S.questions.values()) if (q.kind !== 'text') for (const c of Object.values(cropsOf(q))) if (c?.url?.startsWith('blob:')) URL.revokeObjectURL(c.url);
+  S.questions = new Map();
+  // Keep the order the questions had in their PDFs.
+  for (const q of st.questions.sort((a, b) => a.addedAt - b.addedAt || a.seq - b.seq)) S.questions.set(q.id, hydrate(q));
+  S.modules = st.modules.sort((a, b) => a.createdAt - b.createdAt);
+  S.attempts = st.attempts;
+  S.cur = null; S.rev = null;
+}
+async function closeSpace() {
+  if (!bdbp) return;
+  try { (await bdbp).close(); } catch {}
+  bdbp = null;
+}
+const dropDb = name => new Promise(res => { const r = indexedDB.deleteDatabase(name); r.onsuccess = r.onerror = r.onblocked = () => res(); });
+async function openSpace(db) {
+  await closeSpace();
+  SPACE_DB = db;
+  applyState(await readSpace());
+  loadJournal();
+  S.view = S.questions.size ? 'practice' : 'home';
+}
+
+// ----- Google -----
 let gisP;
 function loadGis() {
   return gisP ??= new Promise((res, rej) => {
@@ -1423,10 +1497,12 @@ function getToken(consent) {
   return new Promise((res, rej) => {
     if (!window.google?.accounts?.oauth2) { loadGis().catch(() => {}); return rej(new Error('Google sign-in is still loading. Try again in a moment')); }
     google.accounts.oauth2.initTokenClient({
-      client_id: GOOGLE_CLIENT_ID, scope: 'https://www.googleapis.com/auth/drive.appdata',
-      prompt: consent ? 'consent' : '', login_hint: SY.email || undefined,
+      client_id: GOOGLE_CLIENT_ID, scope: `openid email profile ${DRIVE_SCOPE}`,
+      prompt: consent ? 'select_account' : '', login_hint: SY.user?.email || undefined,
       callback: r => {
         if (r.error) return rej(new Error(r.error_description || r.error));
+        // Google lets people untick the Drive permission; without it there is nothing to sync to.
+        if (google.accounts.oauth2.hasGrantedAllScopes?.(r, DRIVE_SCOPE) === false) return rej(new Error('Module Builder needs the permission to use its own folder in your Google Drive. Sign in again and leave that box ticked'));
         SY.token = r.access_token; SY.exp = Date.now() + r.expires_in * 1000;
         SS.set('mb-drive-token', JSON.stringify({ token: SY.token, exp: SY.exp }));
         res();
@@ -1448,15 +1524,17 @@ async function gfetch(path, opt = {}, tries = 0) {
 }
 async function driveList() {
   const out = new Map();
-  let page = '';
+  let page = '', bytes = 0;
   do {
-    const r = await (await gfetch(`/drive/v3/files?spaces=appDataFolder&pageSize=1000&fields=nextPageToken,files(id,name,appProperties)${page ? '&pageToken=' + encodeURIComponent(page) : ''}`)).json();
+    const r = await (await gfetch(`/drive/v3/files?spaces=appDataFolder&pageSize=1000&fields=nextPageToken,files(id,name,size,appProperties)${page ? '&pageToken=' + encodeURIComponent(page) : ''}`)).json();
     for (const f of r.files) {
+      bytes += +f.size || 0;
       const k = f.name.replace(/\.json$/, ''), t = +f.appProperties?.t || 0, old = out.get(k);
       if (!old || t > old.t) out.set(k, { id: f.id, t, gone: f.appProperties?.gone === '1' });
     }
     page = r.nextPageToken;
   } while (page);
+  SY.usage = { files: out.size, bytes };
   return out;
 }
 async function driveWrite(k, t, body, gone) {
@@ -1468,17 +1546,20 @@ async function driveWrite(k, t, body, gone) {
   const r = await (await gfetch(`/upload/drive/v3/files${id ? '/' + id : ''}?uploadType=multipart&fields=id`, { method: id ? 'PATCH' : 'POST', body: form })).json();
   SY.ids.set(k, r.id);
 }
+
+// ----- sync -----
 function localRecord(k) {
   const store = STORE_OF[k[0]], id = k.slice(2);
   return { store, id, v: store === 'questions' ? S.questions.get(id) : S[store].find(x => x.id === id) };
 }
 async function pushOne(k) {
   const j = J[k];
-  if (!j?.up) return;
+  if (!j?.up) return 0;
   const { store, v } = localRecord(k);
-  if (j.gone ? !SY.ids.has(k) : !v) { if (J[k] === j) delete j.up; return; }   // nothing on Drive to mark, or gone already
+  if (j.gone ? !SY.ids.has(k) : !v) { if (J[k] === j) delete j.up; return 0; }   // nothing on Drive to mark, or gone already
   await driveWrite(k, j.t, j.gone ? '{}' : JSON.stringify(store === 'questions' ? await packQuestion(v) : v), j.gone);
   if (J[k] === j) delete j.up;   // a change made during the upload stays queued
+  return 1;
 }
 async function pullOne([k, r]) {
   const { store, id, v } = localRecord(k), before = J[k];
@@ -1500,32 +1581,37 @@ async function pullOne([k, r]) {
   }
   if (J[k] === before) J[k] = r.gone ? { t: r.t, gone: 1 } : { t: r.t };
 }
-async function pool(items, fn, label) {
+// Runs fn over items four at a time, with progress in the sync status. Every so often, newly downloaded
+// questions are shown, unless the person is typing.
+async function pool(items, fn, label, show) {
   let next = 0, done = 0;
+  if (items.length > 5) SY.bulk = true;
   const work = async () => {
     while (next < items.length) {
       await fn(items[next++]);
       if (++done % 20 === 0) saveJournal();
       if (items.length > 5) syncMsg(`${label} ${done} of ${items.length}`);
+      if (show && done % 50 === 0 && SHELL.includes(S.view) && !document.activeElement?.matches('input, textarea')) render();
     }
   };
   await Promise.all(Array.from({ length: Math.min(4, items.length) }, work));
 }
 // A full sync compares everything with Drive; a quick one only uploads this device's changes.
+// Resolves to the number of records uploaded.
 function syncNow(full = true) {
-  if (!SY.on) return;
+  if (!SY.on) return Promise.resolve(0);
   if (SY.running) { SY.again = true; SY.full ||= full; return SY.running; }
   return SY.running = (async () => {
-    let pulled = 0;
+    let pulled = 0, pushed = 0;
     try {
-      if (!tokenOk()) return;
+      if (!tokenOk() || !navigator.onLine) return 0;
       SY.err = ''; syncMsg('Syncing');
       if (full || !SY.ids.size) {
         const remote = await driveList();
         SY.ids = new Map([...remote].map(([k, r]) => [k, r.id]));
-        // Records this device has never synced, such as everything from before signing in, or a backup restored
-        // on two computers. A question with the same id is the same question, so it stays put. Of two copies
-        // of a session the one further along wins. Otherwise Drive's copy wins, and what Drive lacks goes up.
+        // Records this space has never synced, such as a backup restored on two computers. A question with
+        // the same id is the same question, so it stays put. Of two copies of a session the one further along
+        // wins. Otherwise Drive's copy wins, and what Drive lacks goes up.
         const keys = [...S.questions.keys()].map(id => `q-${id}`).concat(S.modules.map(m => `m-${m.id}`), S.attempts.map(a => `a-${a.id}`));
         const both = [];
         for (const k of keys) {
@@ -1542,41 +1628,209 @@ function syncNow(full = true) {
           const theirs = await (await gfetch(`/drive/v3/files/${r.id}?alt=media`)).json();
           J[k] = progress(localRecord(k).v) > progress(theirs) ? { t: Math.max(Date.now(), r.t + 1), up: 1 } : { t: 0 };
         }, 'Comparing');
-        for (const p of 'qma') {
+        for (const [p, what] of [['q', 'questions'], ['m', 'modules'], ['a', 'sessions']]) {
           const pulls = [...remote].filter(([k, r]) => k[0] === p && (!J[k] || r.t > J[k].t));
-          await pool(pulls, pullOne, 'Downloading');
+          await pool(pulls, pullOne, `Downloading your ${what}:`, p === 'q');
           pulled += pulls.length;
         }
         if (pulled) S.modules.sort((a, b) => a.createdAt - b.createdAt);
       }
-      await pool(Object.keys(J).filter(k => J[k].up), pushOne, 'Uploading');
+      const ups = Object.keys(J).filter(k => J[k].up);
+      await pool(ups, async k => { pushed += await pushOne(k); }, 'Uploading:');
+      if (full && pushed) await driveList();   // so the Account page counts what was just uploaded
       SY.last = Date.now();
+      return pushed;
     } catch (err) {
-      if (!err.auth) { console.error(err); SY.err = err.message; }
+      if (!err.auth) {
+        console.error(err);
+        SY.err = err instanceof TypeError ? (navigator.onLine ? 'Google Drive could not be reached' : '') : err.message;
+      }
+      return pushed;
     } finally {
       saveJournal();
-      SY.running = null; syncMsg('');
+      SY.running = null; SY.bulk = false; syncMsg('');
       if (pulled && SHELL.includes(S.view)) render();
       if (SY.again) { const f = SY.full; SY.again = SY.full = false; syncNow(f); }
     }
   })();
 }
+// One of ok, busy, paused, err: the colour of the dot by the account's picture.
+function syncState() {
+  if (SY.err) return 'err';
+  if (!navigator.onLine || !tokenOk()) return 'paused';
+  return SY.msg || !SY.last ? 'busy' : 'ok';
+}
 function syncStatus() {
   if (SY.err) return `Sync stopped: ${SY.err}. Click to try again`;
+  if (!navigator.onLine) return 'Offline. Will sync when you’re back';
   if (!tokenOk()) return 'Sync paused. Click to resume';
   return SY.msg || (SY.last ? 'Synced with Google Drive' : 'Connecting to Google Drive');
 }
 function syncMsg(m) {
   SY.msg = m;
-  for (const el of document.querySelectorAll('.sync-line, #sync-status')) { el.textContent = syncStatus(); el.classList.toggle('err', !!SY.err); }
+  for (const el of document.querySelectorAll('.sync-text')) el.textContent = syncStatus();
+  for (const el of document.querySelectorAll('.dot')) el.className = `dot ${syncState()}`;
 }
-const syncLine = () => DRIVE_OK && SY.on ? `<button class="sync-line ${SY.err ? 'err' : ''}" data-act="drive-now" title="Sync with Google Drive now">${esc(syncStatus())}</button>` : '';
-function syncPanel() {
+const firstName = u => u.first || (u.name || u.email || '').split(/[\s@]/)[0];
+function avatar(u, big) {
+  const initial = esc((firstName(u)[0] || '?').toUpperCase());
+  return `<span class="avatar ${big ? 'big' : ''}">${u.photo ? `<img src="${esc(u.photo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}<b>${initial}</b></span>`;
+}
+const PERSON = '<svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><circle cx="10" cy="7" r="3.2"/><path d="M3.8 17c.9-3.2 3.3-4.8 6.2-4.8s5.3 1.6 6.2 4.8"/></svg>';
+// The account button at the top of the sidebar, and in the top bar on phones.
+function accountChip() {
   if (!DRIVE_OK) return '';
-  if (!SY.on) return `<div class="sync-box"><h3>Sync with Google Drive</h3><p>Sign in with Google to keep your progress in your own Google Drive and pick it up on any computer. Module Builder only sees the files it makes there, in a hidden app folder.</p><div class="row"><button class="btn" data-act="drive-on">Sign in with Google</button></div></div>`;
-  return `<div class="sync-box"><h3>Syncing with Google Drive</h3><p>${SY.email ? `Signed in as <b>${esc(SY.email)}</b>. ` : ''}Every change also goes to your Google Drive. Sign in with the same Google account on another computer to pick up where you left off.</p>
-    <p class="fine" id="sync-status">${esc(syncStatus())}</p>
-    <div class="row"><button class="btn ghost" data-act="drive-now">Sync now</button><button class="btn ghost" data-act="drive-off">Sign out</button><button class="link danger" data-act="drive-wipe">Remove from Google Drive</button></div></div>`;
+  const here = S.view === 'account' ? 'aria-current="page"' : '';
+  if (!SY.user) return `<button class="acct" data-act="go" data-v="account" ${here}><span class="avatar empty">${PERSON}</span><span class="acct-t"><b>Sign in</b><small>Keep your progress everywhere</small></span></button>`;
+  return `<button class="acct" data-act="go" data-v="account" ${here} title="${esc(SY.user.email)}"><span class="avatar-wrap">${avatar(SY.user)}<i class="dot ${syncState()}"></i></span><span class="acct-t"><b>${esc(firstName(SY.user))}</b><small class="sync-text">${esc(syncStatus())}</small></span></button>`;
+}
+function ago(t) {
+  const s = (Date.now() - t) / 1000;
+  return s < 60 ? 'just now' : s < 3600 ? `${Math.round(s / 60)} min ago` : s < 86400 ? `${Math.round(s / 3600)} h ago` : shortDate(t);
+}
+const MB = b => b < 1e6 ? `${Math.max(1, Math.round(b / 1e3))} KB` : `${(b / 1e6).toFixed(b < 1e7 ? 1 : 0)} MB`;
+function viewAccount() {
+  if (!DRIVE_OK) return `<h1 class="title">Account</h1><p class="lede">Signing in isn’t available here. Open the app at <a href="https://iamraging123.github.io/module-builder/" target="_blank" rel="noopener">iamraging123.github.io/module-builder</a> to sign in.</p>`;
+  const u = SY.user, sessions = S.attempts.filter(a => a.finishedAt).length;
+  if (!u) return `<h1 class="title">Your account</h1>
+    <p class="lede">Sign in with Google to keep your progress in your own Google Drive and pick it up on any computer.</p>
+    <ul class="points"><li>Each Google account gets its own space, so people sharing a computer don’t see each other’s progress.</li>
+      <li>Module Builder only sees the files it makes in your Drive, in a hidden app folder. Nothing goes to anyone else.</li>
+      <li>Without an account, your progress stays in this browser.</li></ul>
+    <div class="row"><button class="btn" data-act="drive-on">Sign in with Google</button></div>
+    <p class="fine">The first time, Google may say it hasn’t verified this app. Press <b>Advanced</b>, then <b>Go to ModuleBuilder</b>. <a href="privacy.html" target="_blank" rel="noopener">Privacy and terms</a></p>`;
+  const drive = SY.usage?.files ? ` Your Google Drive holds ${plural(SY.usage.files, 'file')}, ${MB(SY.usage.bytes)}.` : '';
+  return `<div class="acct-head">${avatar(u, true)}<div><h1 class="title">${esc(u.name || firstName(u))}</h1><p class="fine">${esc(u.email)}</p></div></div>
+    <section class="block"><h2>Sync</h2>
+      <p class="sync-status"><i class="dot ${syncState()}"></i><span class="sync-text">${esc(syncStatus())}</span></p>
+      <p class="fine">${SY.last ? `Last synced ${ago(SY.last)}.` : ''}${drive} Changes go to your Drive a few seconds after you make them.</p>
+      <div class="row"><button class="btn ghost" data-act="drive-now">Sync now</button></div></section>
+    <section class="block"><h2>On this ${backend === 'server' ? 'computer' : 'browser'}</h2>
+      <p>${plural(S.questions.size, 'question')}, ${plural(S.modules.length, 'module')} and ${plural(sessions, 'finished session')}${backend === 'server' ? ', in the data folder next to this app' : ''}.</p>${backupControls()}</section>
+    <section class="block"><h2>Sign out</h2>
+      <p>${backend === 'server' ? 'Signing out stops syncing. Everything stays in the data folder and in your Google Drive.' : 'On a shared computer, sign out when you’re done and remove your progress from this browser. It stays in your Google Drive.'}</p>
+      <div class="row"><button class="btn ghost" data-act="drive-off">Sign out</button><button class="link danger" data-act="drive-wipe">Delete my data</button></div></section>`;
+}
+function toast(msg) {
+  let t = $('#toast');
+  if (!t) { t = document.createElement('div'); t.id = 'toast'; t.className = 'toast'; t.setAttribute('role', 'status'); document.body.append(t); }
+  t.textContent = msg; t.classList.add('on');
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.classList.remove('on'), 2600);
+}
+// Called when a session ends: send it to Drive now rather than in a few seconds, and say so.
+async function afterSession() {
+  if (!SY.on || !tokenOk()) return;
+  await SY.running;
+  if (await syncNow(false)) toast('Saved to Google Drive');
+}
+
+// ----- signing in and out -----
+async function signIn() {
+  try { await getToken(true); }
+  catch (err) { S.notice = `Signing in with Google did not finish: ${err.message}.`; S.noticeErr = true; return render(); }
+  let me;
+  try { me = await (await gfetch('/oauth2/v3/userinfo')).json(); }
+  catch (err) { SY.token = ''; S.notice = `Your Google account could not be read (${err.message}). Try again.`; S.noticeErr = true; return render(); }
+  const id = me.sub, user = { name: me.name || '', first: me.given_name || '', email: me.email || '', photo: me.picture || '' };
+  const all = accounts();
+  if (backend === 'browser') {
+    const known = all[id], guest = SPACE_DB;
+    let choice = 'keep';
+    if (S.questions.size || S.attempts.length) {
+      const done = S.attempts.filter(a => a.finishedAt).length;
+      choice = await choose(`This browser has ${plural(S.questions.size, 'question')} and ${plural(done, 'finished session')} from before you signed in. Add them to ${user.email || 'your account'}? If you keep them separate, they come back when you sign out.`, [['add', 'Add them to my account'], ['keep', 'Keep them separate']]);
+      if (!choice) { SY.token = ''; SS.set('mb-drive-token', null); return; }
+    }
+    if (choice === 'add' && !known) {
+      // The guest space simply becomes the account's, sync history and all, and a new empty guest space starts.
+      all[id] = { db: guest };
+      LS.set('mb-guest-db', `module-builder-guest-${uid()}`);
+    } else {
+      all[id] = known || { db: `module-builder-u-${id}` };
+      const carry = choice === 'add' ? { questions: [...S.questions.values()], modules: S.modules, attempts: S.attempts } : null;
+      S.busy = 'Opening your account'; render();
+      await openSpace(all[id].db);
+      if (carry) {
+        // This account already had a space here: copy the guest’s records into it, then empty the guest space.
+        for (const q of carry.questions) S.questions.set(q.id, await saveQuestion(q));
+        // A module both spaces have, such as a question set imported in each, is kept once.
+        const same = new Map();
+        for (const m of carry.modules) {
+          const twin = S.modules.find(x => x.id !== m.id && x.name === m.name && x.qids.join() === m.qids.join());
+          if (twin) same.set(m.id, twin.id);
+        }
+        carry.modules = carry.modules.filter(m => !same.has(m.id));
+        carry.attempts = carry.attempts.map(a => same.has(a.moduleId) ? { ...a, moduleId: same.get(a.moduleId) } : a);
+        for (const store of ['modules', 'attempts']) for (const v of carry[store]) {
+          await put(store, v);
+          const i = S[store].findIndex(x => x.id === v.id);
+          if (i >= 0) S[store][i] = v; else S[store].push(v);
+        }
+        S.modules.sort((a, b) => a.createdAt - b.createdAt);
+        await dropDb(guest); LS.set(jKey(guest), null);
+        LS.set('mb-guest-db', `module-builder-guest-${uid()}`);
+      }
+      S.busy = '';
+    }
+  } else {
+    all[id] = {};
+  }
+  Object.assign(all[id], user);
+  saveAccounts(all);
+  LS.set('mb-active', id);
+  SY.user = { id, ...user }; SY.on = true; SY.err = ''; SY.last = 0;
+  S.notice = 'Signed in. Your progress now syncs with your Google Drive.'; S.noticeErr = false;
+  render();
+  syncNow(true);
+}
+// Signing out on a shared computer should leave nothing behind, so removing this browser's copy is the default.
+async function signOut() {
+  const u = SY.user, local = backend === 'browser';
+  if (tokenOk() && navigator.onLine && pendingCount()) {
+    S.busy = 'Saving your last changes to Google Drive'; render();
+    await SY.running; await syncNow(false);
+    S.busy = ''; render();
+  }
+  const left = pendingCount();
+  const unsaved = left ? ` ${plural(left, 'change')} ${left === 1 ? 'hasn’t' : 'haven’t'} reached your Google Drive yet${tokenOk() ? '' : ' (press Sync now first)'}, and removing would lose ${left === 1 ? 'it' : 'them'}.` : '';
+  const choice = local
+    ? await choose(`Sign out of ${u.email}? On a shared computer, remove your progress from this browser so the next person can’t see it. It stays in your Google Drive.${unsaved}`, [['remove', 'Remove from this browser', left ? 'danger' : ''], ['keep', 'Keep a copy here']])
+    : (await ask(`Sign out of ${u.email}? Your progress stays in the data folder and in your Google Drive, but stops syncing.`, 'Sign out')) && 'keep';
+  if (!choice) return;
+  await leaveAccount(choice === 'remove');
+  S.notice = choice === 'remove' ? 'Signed out, and your progress was removed from this browser.' : 'Signed out.'; S.noticeErr = false;
+  render();
+}
+async function leaveAccount(remove) {
+  const u = SY.user, all = accounts();
+  clearTimeout(SY.timer); SY.timer = 0;
+  await SY.running;
+  Object.assign(SY, { on: false, user: null, token: '', exp: 0, ids: new Map(), usage: null, err: '', msg: '', last: 0 });
+  SS.set('mb-drive-token', null); LS.set('mb-active', null);
+  if (backend === 'browser') {
+    if (remove && all[u.id]) { await closeSpace(); await dropDb(all[u.id].db); LS.set(jKey(all[u.id].db), null); delete all[u.id]; saveAccounts(all); }
+    await openSpace(guestDb());
+  } else {
+    J = {}; saveJournal();
+  }
+}
+// Deletes the account's copy in Google Drive and, in the browser, this browser's copy too.
+async function deleteAccountData() {
+  const local = backend === 'browser';
+  if (!await ask(`Delete your Module Builder data from Google Drive${local ? ' and from this browser' : ''}? This can’t be undone. Export a backup first if you want a copy.${local ? '' : ' The data folder on this computer is kept.'} Other computers that are still signed in would upload their copy again, so sign out there first.`, 'Delete my data', true)) return;
+  try {
+    if (!tokenOk()) await getToken(false);
+    clearTimeout(SY.timer); SY.timer = 0;
+    await SY.running;
+    const files = [...(await driveList()).values()];
+    S.busy = 'Deleting your data from Google Drive'; render();
+    await pool(files, f => gfetch(`/drive/v3/files/${f.id}`, { method: 'DELETE' }).catch(err => { if (!/404/.test(err.message)) throw err; }), 'Deleting:');
+    await leaveAccount(local);
+    S.notice = `Your data was deleted from Google Drive${local ? ' and this browser' : ''}, and you are signed out.`; S.noticeErr = false;
+  } catch (err) {
+    S.notice = `Could not delete everything from Google Drive (${err.message}). Try again.`; S.noticeErr = true;
+  }
+  S.busy = ''; render();
 }
 // Asking for a new token opens a window, so it waits for a click rather than popping up by itself.
 async function resumeSync() {
@@ -1584,25 +1838,31 @@ async function resumeSync() {
   catch (err) { SY.err = err.message; syncMsg(''); return; }
   syncNow(true);
 }
-function signOutDrive() {
-  if (SY.token) window.google?.accounts?.oauth2?.revoke(SY.token, () => {});
-  Object.assign(SY, { on: false, token: '', exp: 0, email: '', ids: new Map(), err: '', last: 0 });
-  J = {}; saveJournal();
-  for (const k of ['mb-drive', 'mb-drive-email']) LS.set(k, null);
-  SS.set('mb-drive-token', null);
-}
-function startSync() {
+// At boot: which space to open, and whether an account is signed in.
+function startAccounts() {
   if (!DRIVE_OK) return;
-  try { J = JSON.parse(LS.get(jKey()) || '{}'); } catch { J = {}; }
-  if (!LS.get('mb-drive')) return;
-  SY.on = true; SY.email = LS.get('mb-drive-email') || '';
+  // Before accounts had their own spaces (October 2026), one journal served the single browser space, and the
+  // sign-in was a flag. That browser space is the guest space now; signing in offers to add it to the account.
+  const old = LS.get('mb-sync-browser');
+  if (old != null) { LS.set('mb-sync-module-builder-browser', old); LS.set('mb-sync-browser', null); }
+  for (const k of ['mb-drive', 'mb-drive-email']) LS.set(k, null);
+  const id = LS.get('mb-active'), acc = id && accounts()[id];
+  if (!acc) { LS.set('mb-active', null); return; }
+  SY.user = { id, ...acc }; SY.on = true;
+  if (backend === 'browser') SPACE_DB = acc.db;
   try { Object.assign(SY, JSON.parse(SS.get('mb-drive-token')) || {}); } catch {}
   loadGis().catch(() => {});
-  syncNow(true);
 }
 setInterval(() => { if (SY.on && tokenOk() && !document.hidden) syncNow(true); }, 120e3);
-document.addEventListener('visibilitychange', () => { if (!document.hidden && SY.on && tokenOk()) syncNow(true); });
-// After a reload in a new tab the token is gone: the first click on a page outside a test brings it back.
+document.addEventListener('visibilitychange', () => {
+  if (!SY.on || !tokenOk()) return;
+  // Leaving the tab sends what's waiting; coming back fetches what changed elsewhere.
+  syncNow(!document.hidden);
+});
+addEventListener('online', () => { syncMsg(''); if (SY.on && tokenOk()) syncNow(true); });
+addEventListener('offline', () => syncMsg(''));
+addEventListener('beforeunload', e => { if (SY.bulk) { e.preventDefault(); e.returnValue = ''; } });
+// After a reload in a new tab the token is gone: the first click on a page outside a session brings it back.
 document.addEventListener('click', e => {
   if (!SY.on || tokenOk() || SY.autoTried || !SHELL.includes(S.view) || e.target.closest('[data-act^="drive-"]')) return;
   SY.autoTried = true; resumeSync();
@@ -1650,19 +1910,19 @@ async function migrateBrowserStore() {
   }
   if (!st && !S.offline) {
     backend = 'browser';
-    st = { questions: await idb('questions', 'readonly', o => o.getAll()), modules: await idb('modules', 'readonly', o => o.getAll()), attempts: await idb('attempts', 'readonly', o => o.getAll()) };
+    SPACE_DB = guestDb();
     // Ask the browser not to clear this site's storage when space runs low.
     navigator.storage?.persist?.().catch(() => {});
   }
-  if (st) {
-    // Keep the order the questions had in their PDFs.
-    for (const q of st.questions.sort((a, b) => a.addedAt - b.addedAt || a.seq - b.seq)) S.questions.set(q.id, hydrate(q));
-    S.modules = st.modules.sort((a, b) => a.createdAt - b.createdAt);
-    S.attempts = st.attempts;
+  if (!S.offline) {
+    startAccounts();   // may switch to the signed-in account's space
+    if (backend === 'browser') st = await readSpace();
+    applyState(st);
+    loadJournal();
   }
   if (S.questions.size) S.view = 'practice';
-  if (!S.offline) startSync();
   render();
+  syncNow(true);
   if (backend === 'server' && !S.offline) await migrateBrowserStore();
   // Dev hook: index.html?load=a.pdf,b.pdf imports files served next to the page.
   const load = new URLSearchParams(location.search).get('load');
