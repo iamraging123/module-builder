@@ -29,7 +29,7 @@ This site does not include any test questions; you bring your own exports.
 
 ## Question sets in JSON
 
-Besides PDFs, you can import your own question sets as a `.json` file with a `questions` list. Each question has `id`, `section`, `domain`, `skill`, `type` (`multiple_choice` or `student_produced`), `passage`, `prompt`, `choices` (`[{ "id": "A", "text": "..." }]`), `answer`, optional `accepted_answers`, and `explanation`. An optional `rules` list (`{ "id", "text" }`) is shown after each answer through a question's `rule_id`. A set becomes a study module as soon as it is imported.
+Besides PDFs, you can import your own question sets as a `.json` file with a `questions` list. Each question has `id`, `section`, `domain`, `skill`, `type` (`multiple_choice` or `student_produced`), `passage`, `prompt`, `choices` (`[{ "id": "A", "text": "..." }]`), `answer`, optional `accepted_answers`, and `explanation`. An optional `test` (`SAT`, `PSAT/NMSQT` or `PSAT 8/9`), on the set's `module` or on a question, says which test it is for. An optional `rules` list (`{ "id", "text" }`) is shown after each answer through a question's `rule_id`. A set becomes a study module as soon as it is imported.
 
 ## Running it on your own computer
 

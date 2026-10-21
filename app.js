@@ -23,6 +23,14 @@ const TAXONOMY = {
     'Geometry and Trigonometry': ['Area and volume', 'Lines, angles, and triangles', 'Right triangles and trigonometry', 'Circles'],
   },
 };
+// The three tests of the digital SAT suite. A question bank export names its test in the "Assessment" column.
+// Their modules are timed the same way, so what differs is which questions belong to which.
+const TESTS = { SAT: 'SAT', PSAT: 'PSAT/NMSQT & PSAT 10', PSAT89: 'PSAT 8/9' };
+const TEST_SHORT = { SAT: 'SAT', PSAT: 'PSAT', PSAT89: 'PSAT 8/9' };
+function testOf(s) {
+  const k = nos(s || '').toLowerCase();
+  return k.startsWith('psat8') ? 'PSAT89' : k.startsWith('psat') ? 'PSAT' : k.startsWith('sat') ? 'SAT' : null;
+}
 // The PDF text layer has stray spaces ("Algebr a"), so names are matched with whitespace removed.
 const CANON = new Map();
 for (const [sec, doms] of Object.entries(TAXONOMY)) {
@@ -109,7 +117,7 @@ async function storeQuestion(q) {
   // Questions imported from a JSON set are plain text and are stored as they are.
   if (q.kind === 'text') { const meta = { ...q, updatedAt: Date.now() }; await api('PUT', `/api/questions/${q.id}`, { meta, images: {} }); return meta; }
   const images = {}, size = c => c && { w: c.w, h: c.h };
-  for (const [name, c] of Object.entries(cropsOf(q))) if (c) images[name] = await toDataUrl(c.blob);
+  for (const [name, c] of Object.entries(cropsOf(q))) if (c) images[name] = await toDataUrl(c.blob || await (await fetch(c.url)).blob());
   const meta = { ...q, updatedAt: Date.now(), stem: size(q.stem), answerImg: size(q.answerImg), rationale: size(q.rationale), choices: q.choices.map(size) };
   await api('PUT', `/api/questions/${q.id}`, { meta, images });
   return hydrate(meta);
@@ -119,7 +127,7 @@ async function storeQuestion(q) {
 const S = {
   questions: new Map(), modules: [], attempts: [],
   view: 'home', busy: '', notice: '', noticeErr: false,
-  filter: { section: '', diff: new Set(), skills: new Set(), status: 'any' },
+  filter: { section: '', diff: new Set(), skills: new Set(), status: 'any' }, test: '',
   skillsOpen: false,
   form: { mode: 'test', count: null, minutes: null, timed: true, shuffle: false },
   cur: null, elim: false, nav: false, clockHidden: false, ref: false,
@@ -340,10 +348,17 @@ async function buildQuestion(pages, source) {
       const m = /corr\s*ect\s*answer\s*is\s*([-−]?[\d\s.,\/]*\d)\s*\./i.exec(ratText);
       if (m) r = nos(m[1]).replace(/−/g, '-');
     }
+    // When the answer itself is drawn as math, the rationale may still end with
+    // "Note that 3/2 and 1.5 are examples of ways to enter a correct answer."
+    if (!r) {
+      const m = /notethat(.+?)(?:are|is)(?:an)?examples?ofwaystoenteracorrectanswer/.exec(nos(ratText).toLowerCase().replace(/[−–]/g, '-'));
+      if (m) r = m[1].split(/,|and/).join(',');
+    }
     accepted = r.split(',').filter(t => !isNaN(parseNum(t)));
     correct = accepted.length ? accepted.join(' or ') : null;
   }
-  return { id, source, section, domain, skill, difficulty, type, correct, accepted, stem, choices: type === 'mc' ? choices : [], answerImg, rationale };
+  const test = testOf(meta[0]);
+  return { id, source, tests: test ? [test] : [], section, domain, skill, difficulty, type, correct, accepted, stem, choices: type === 'mc' ? choices : [], answerImg, rationale };
 }
 
 // ---------- grading ----------
@@ -413,16 +428,33 @@ function history() {
 function accuracy() {
   const by = { skill: new Map(), domain: new Map(), section: new Map(), diff: new Map(), total: { n: 0, c: 0 } };
   const add = (map, k, g) => { const r = map.get(k) || { n: 0, c: 0 }; r.n++; if (g) r.c++; map.set(k, r); };
+  const t = curTest();
   for (const a of S.attempts.filter(a => a.finishedAt || a.mode === 'study')) {
     for (const q of counted(a)) {
       const g = grade(q, a);
-      if (g === null) continue;
+      if (g === null || !forTest(q, t)) continue;
       add(by.skill, q.skill, g); add(by.domain, q.domain, g); add(by.section, q.section, g);
       add(by.diff, `${q.section}|${q.difficulty}`, g);
       by.total.n++; if (g) by.total.c++;
     }
   }
   return by;
+}
+// The test being studied for ('' = all), chosen at the top of Practice, Mistakes and Skills once the bank holds
+// more than one. A question that doesn't say which test it is from counts for every test.
+function testsInBank() {
+  const have = new Set();
+  for (const q of S.questions.values()) for (const t of q.tests || []) have.add(t);
+  return Object.keys(TESTS).filter(t => have.has(t));
+}
+const curTest = () => S.test && testsInBank().includes(S.test) ? S.test : '';
+const forTest = (q, t = curTest()) => !t || !q.tests?.length || q.tests.includes(t);
+const bankQs = () => { const t = curTest(); return [...S.questions.values()].filter(q => forTest(q, t)); };
+function testPicker() {
+  const tests = testsInBank();
+  if (tests.length < 2) return '';
+  const all = [...S.questions.values()];
+  return `<div class="test-pick"><span class="lab">Studying for</span>${seg('set-test', [['', 'All tests', all.length], ...tests.map(t => [t, TESTS[t], all.filter(q => forTest(q, t)).length])], curTest())}</div>`;
 }
 const STATUS = {
   unseen: (h, q) => !h.has(q.id),
@@ -431,7 +463,7 @@ const STATUS = {
 };
 function matching() {
   const f = S.filter, h = f.status === 'any' ? null : history();
-  return [...S.questions.values()].filter(q =>
+  return bankQs().filter(q =>
     (!f.section || q.section === f.section) &&
     (!f.diff.size || f.diff.has(q.difficulty)) &&
     (!f.skills.size || f.skills.has(q.skill)) &&
@@ -447,7 +479,8 @@ const sectionOf = qs => { const s = new Set(qs.map(q => q.section)); return s.si
 // mode 'test' = Bluebook-style module graded at the end; 'study' = one question at a time, checked as you go.
 // extra: { today, kinds, auto } for sets the app builds itself.
 async function createModule(qs, name, seconds, mode = 'test', extra = {}) {
-  const m = { ...extra, id: uid(), name, mode, qids: qs.map(q => q.id), seconds: mode === 'study' ? null : seconds, section: sectionOf(qs), createdAt: Date.now() };
+  const tests = new Set(qs.flatMap(q => q.tests || []));
+  const m = { ...extra, id: uid(), name, mode, qids: qs.map(q => q.id), seconds: mode === 'study' ? null : seconds, section: sectionOf(qs), test: curTest() || (tests.size === 1 ? [...tests][0] : ''), createdAt: Date.now() };
   await put('modules', m);
   S.modules.push(m);
   return m;
@@ -531,8 +564,10 @@ function reviewState() {
       if (w && (!why.has(q.id) || why.get(q.id).t < t)) why.set(q.id, { ...w, t });
     }
   }
-  const out = new Map(), today = startOfDay(Date.now());
+  const out = new Map(), today = startOfDay(Date.now()), t = curTest();
   for (const [id, list] of ev) {
+    const q = S.questions.get(id);
+    if (q && !forTest(q, t)) continue;
     list.sort((x, y) => x.t - y.t);
     const wrongs = list.filter(e => !e.g).length;
     if (!wrongs) continue;
@@ -557,7 +592,7 @@ const REASONS = {
 const pctOf = r => Math.round(100 * r.c / r.n);
 const level = p => p < 60 ? 'low' : p < 80 ? 'mid' : 'high';
 function weakSkills(acc) {
-  return [...acc.skill].filter(([k, r]) => r.n >= 3 && pctOf(r) < 80 && [...S.questions.values()].some(q => q.skill === k))
+  return [...acc.skill].filter(([k, r]) => r.n >= 3 && pctOf(r) < 80 && bankQs().some(q => q.skill === k))
     .sort((x, y) => pctOf(x[1]) - pctOf(y[1]) || y[1].n - x[1].n);
 }
 
@@ -669,7 +704,7 @@ function viewStart() {
         : `<p>Sign in with Google to keep your progress in your own Google Drive and pick it up on any computer. Or use Module Builder without an account, and your progress stays in this browser.</p>`,
         SY.user ? '' : `<button class="btn" data-act="drive-on">Sign in with Google</button>${LS.get('mb-guest-ok') ? '' : '<button class="link" data-act="guest-ok">Continue without an account</button>'}`) : ''}
       ${step(n > 0, 'Get questions from the College Board', `<p>Open the <a href="https://satsuiteeducatorquestionbank.collegeboard.org/" target="_blank" rel="noopener">College Board question bank</a>. It\u2019s free and needs no account.</p>
-        <ul><li>Choose the test (SAT, PSAT/NMSQT and PSAT 10, or PSAT 8/9), a section, and the domains and skills you want.</li><li>Tick the questions you want, or select them all.</li><li>Press <b>Export</b>, choose <b>With correct answers and explanations</b>, then press <b>Download PDF</b>.</li></ul>
+        <ul><li>Choose the test (SAT, PSAT/NMSQT and PSAT 10, or PSAT 8/9), a section, and the domains and skills you want. You can add questions from more than one test: Module Builder keeps track of which is which, and Practice lets you pick the test you’re studying for.</li><li>Tick the questions you want, or select them all.</li><li>Press <b>Export</b>, choose <b>With correct answers and explanations</b>, then press <b>Download PDF</b>.</li></ul>
         <p class="fine">The other two export options leave out the answers, so Module Builder couldn’t grade those questions. Full practice tests from Bluebook can\u2019t be imported. Question bank exports are the way in.</p>`)}
       ${step(n > 0, 'Add the PDF here', `<p>Drop the PDF anywhere on this page, or press Add questions. It takes about a second per question. Adding the same questions again updates them instead of making copies.</p>
         ${n ? `<p class="fine">Your bank has ${plural(n, 'question')}.</p>` : ''}`, `<button class="btn" data-act="choose">Add questions</button>`)}
@@ -684,7 +719,7 @@ function viewStart() {
 
 // ---------- Practice ----------
 function viewPractice() {
-  const all = [...S.questions.values()], f = S.filter;
+  const all = bankQs(), f = S.filter;
   if (!all.length) return `<h1 class="title">Practice</h1><p class="lede">Add questions to your bank first, then build modules from them here.</p><div class="row"><button class="btn" data-act="choose">Add questions</button></div>`;
   const secs = [...new Set(all.map(q => q.section))];
   const inSec = all.filter(q => !f.section || q.section === f.section);
@@ -698,7 +733,7 @@ function viewPractice() {
   const mins = S.form.minutes ?? Math.round(defaultSeconds(qs.slice(0, n)) / 60);
   const filtered = f.section || f.diff.size || f.skills.size || f.status !== 'any';
   const study = S.form.mode === 'study';
-  let h = `<h1 class="title">Practice</h1><p class="lede">Build a module from your bank: a timed test like the real thing, or a study session that checks each answer.</p><div class="builder">`;
+  let h = `<h1 class="title">Practice</h1><p class="lede">Build a module from your bank: a timed test like the real thing, or a study session that checks each answer.</p>${testPicker()}<div class="builder">`;
   if (secs.length > 1) h += `<div class="field"><span class="lab">Section</span>${seg('f-section', [['', 'Both', all.length], ...secs.map(x => [x, x, all.filter(q => q.section === x).length])], f.section)}</div>`;
   if (diffs.length > 1) h += `<div class="field"><span class="lab">Difficulty</span><div class="ticks">${diffs.map(d => tick_('f-diff', d, d, f.diff.has(d), `<small>${count('difficulty', d)}</small>`)).join('')}</div></div>`;
   if (hist.size) h += `<div class="field"><span class="lab">History</span>${seg('f-status', [['any', 'Any'], ['unseen', 'New to me', statusCount('unseen')], ['missed', 'Still missed', statusCount('missed')], ['ever', 'Ever missed', statusCount('ever')]], f.status)}</div>`;
@@ -721,7 +756,7 @@ function viewPractice() {
     if (rows.length) h += `<section class="block"><h2>Your modules</h2><div class="list">${rows.map(({ m, open, last }) => {
       const t = last && tally(last);
       const state = open ? `On question ${open.idx + 1} of ${open.qids.length}` : !t ? 'Not started' : t.n ? `Last score ${t.c}/${t.n}` : 'Nothing answered last time';
-      return `<div class="li"><div class="li-main"><div class="li-title">${esc(m.name)}</div><div class="li-meta">${plural(m.qids.length, 'question')}, ${m.mode === 'study' ? 'study' : m.seconds ? Math.round(m.seconds / 60) + ' min test' : 'untimed test'}, ${shortDate(m.createdAt)}. ${state}.</div></div>
+      return `<div class="li"><div class="li-main"><div class="li-title">${esc(m.name)}</div><div class="li-meta">${testsInBank().length > 1 && m.test ? `${TEST_SHORT[m.test]}, ` : ''}${plural(m.qids.length, 'question')}, ${m.mode === 'study' ? 'study' : m.seconds ? Math.round(m.seconds / 60) + ' min test' : 'untimed test'}, ${shortDate(m.createdAt)}. ${state}.</div></div>
         <div class="li-acts">${last ? `<button class="link" data-act="results" data-id="${last.id}">Results</button>` : ''}<button class="link danger" data-act="del-module" data-id="${m.id}">Delete</button>
         <button class="btn ${open ? '' : 'ghost'} small" data-act="${open ? 'resume' : 'start'}" data-id="${open ? open.id : m.id}">${open ? 'Resume' : !last ? 'Start' : m.mode === 'study' ? 'Study again' : 'Retake'}</button></div></div>`;
     }).join('')}</div></section>`;
@@ -731,7 +766,7 @@ function viewPractice() {
 // Modules name themselves after the filters that built them, for example "Hard Math, Linear functions".
 function moduleName(qs) {
   const f = S.filter, sec = sectionOf(qs);
-  const head = [{ unseen: 'New', missed: 'Still missed', ever: 'Ever missed' }[f.status], f.diff.size ? ['Easy', 'Medium', 'Hard'].filter(d => f.diff.has(d)).join(' and ') : '', sec === 'Mixed' ? 'Both sections' : sec].filter(Boolean).join(' ');
+  const head = [testsInBank().length > 1 && curTest() ? TEST_SHORT[curTest()] : '', { unseen: 'New', missed: 'Still missed', ever: 'Ever missed' }[f.status], f.diff.size ? ['Easy', 'Medium', 'Hard'].filter(d => f.diff.has(d)).join(' and ') : '', sec === 'Mixed' ? 'Both sections' : sec].filter(Boolean).join(' ');
   const skills = [...new Set(qs.map(q => q.skill))];
   return head + (f.skills.size ? `, ${skills.length === 1 ? short(skills[0]) : plural(skills.length, 'skill')}` : '');
 }
@@ -740,7 +775,7 @@ function moduleName(qs) {
 function viewMistakes() {
   const rs = reviewState();
   const items = [...rs].map(([id, r]) => [S.questions.get(id), r]).filter(([q]) => q);
-  if (!items.length) return `<h1 class="title">Mistakes</h1><p class="lede">Nothing here yet. Every question you get wrong lands here, comes back for review the next day, and clears after two right answers in a row.</p>`;
+  if (!items.length) return `<h1 class="title">Mistakes</h1>${testPicker()}<p class="lede">Nothing here yet. Every question you get wrong lands here, comes back for review the next day, and clears after two right answers in a row.</p>`;
   const due = items.filter(([, r]) => r.status === 'due'), later = items.filter(([, r]) => r.status === 'later'), cleared = items.filter(([, r]) => r.status === 'cleared');
   const open = [...due, ...later];
   const counts = Object.keys(REASONS).map(k => [k, open.filter(([, r]) => r.why?.reason === k).length]).filter(([, n]) => n);
@@ -749,11 +784,11 @@ function viewMistakes() {
   const show = list => list.filter(([, r]) => !f || (f === 'none' ? !r.why?.reason : r.why?.reason === f));
   const row = ([q, r]) => `<div class="li mistake ${r.why?.reason ? 'r-' + r.why.reason : ''}">
       <div class="li-main"><div class="li-title">${esc(short(q.skill))}</div>
-        <div class="li-meta">${esc([q.section, q.difficulty, q.source].filter(Boolean).join(', '))}</div>
+        <div class="li-meta">${esc([testsInBank().length > 1 ? (q.tests || []).map(t => TEST_SHORT[t]).join(' and ') : '', q.section, q.difficulty, q.source].filter(Boolean).join(', '))}</div>
         <div class="li-meta">Missed ${r.wrongs === 1 ? 'once' : `${r.wrongs} times`}, last answered ${shortDate(r.last)}.${r.streak ? ` Right ${r.streak === 1 ? 'once' : 'twice'} since.` : ''}</div>
         ${r.why ? `<p class="why-note"><mark class="r-${r.why.reason}">${esc(REASONS[r.why.reason] || '')}</mark>${r.why.note ? ` ${esc(r.why.note)}` : ''}</p>` : ''}</div>
       <div class="li-acts"><span class="when ${r.status}">${r.status === 'due' ? 'Due now' : r.status === 'later' ? `Back ${shortDate(r.due)}` : 'Cleared'}</span>${r.status === 'cleared' ? '' : `<button class="btn ghost small" data-act="practise-one" data-id="${q.id}">Practice</button>`}</div></div>`;
-  let h = `<h1 class="title">Mistakes</h1><p class="lede">${due.length ? `${plural(due.length, 'question')} due for review now` : 'Nothing is due right now'}${later.length ? `, ${later.length} coming back later` : ''}${cleared.length ? `, ${cleared.length} cleared` : ''}.</p>`;
+  let h = `<h1 class="title">Mistakes</h1>${testPicker()}<p class="lede">${due.length ? `${plural(due.length, 'question')} due for review now` : 'Nothing is due right now'}${later.length ? `, ${later.length} coming back later` : ''}${cleared.length ? `, ${cleared.length} cleared` : ''}.</p>`;
   if (due.length) h += `<div class="row"><button class="btn big" data-act="retest-due">Review the ${due.length} due now</button></div>`;
   if (counts.length) {
     const total = open.length;
@@ -779,7 +814,7 @@ function skillTree(sec, qs) {
   return [...tree].map(([d, sks]) => [d, sks.filter(k => qs.some(q => q.skill === k))]).filter(([, sks]) => sks.length);
 }
 function viewSkills() {
-  const all = [...S.questions.values()], acc = accuracy(), hist = history(), rs = reviewState();
+  const all = bankQs(), acc = accuracy(), hist = history(), rs = reviewState();
   if (!all.length) return `<h1 class="title">Skills</h1><p class="lede">Add questions to your bank and answer a few, and every skill on the test shows up here with how you’re doing.</p>`;
   const still = all.filter(q => STATUS.missed(hist, q)).length, seen = all.filter(q => hist.has(q.id)).length;
   const time = S.attempts.reduce((t, a) => t + (a.elapsed || 0), 0);
@@ -803,7 +838,7 @@ function viewSkills() {
     ${rules.length ? `<h4>Rules from your question sets</h4>${rules.map(t => `<p class="rule">${esc(t)}</p>`).join('')}` : ''}
     <div class="row"><button class="btn" data-act="study-skill" data-v="${esc(k)}" ${qs.length ? '' : 'disabled'}>Study 5 new</button>${kDue ? `<button class="btn ghost" data-act="study-skill-missed" data-v="${esc(k)}">Review ${kDue} missed</button>` : ''}</div></aside>`;
   const finished = S.attempts.filter(a => a.finishedAt).sort((a, b) => b.finishedAt - a.finishedAt);
-  return `<h1 class="title">Skills</h1>
+  return `<h1 class="title">Skills</h1>${testPicker()}
     ${acc.total.n ? `<dl class="figs">${fig(acc.total.n, 'Answers checked')}${fig(pctOf(acc.total) + '%', 'Right overall')}${fig(still, 'Still missed')}${fig(`${seen} of ${all.length}`, 'Bank questions seen')}${fig(fmtDuration(time), 'Time practicing')}</dl>` : '<p class="lede">Answer some questions and your accuracy fills in here, skill by skill.</p>'}
     <div class="map-key"><span>Percent right</span><span class="ramp"><i class="m0"></i><i class="m1"></i><i class="m2"></i><i class="m3"></i><i class="m4"></i></span><span>0 to 100%</span><span class="none-key"></span><span>Not tried</span></div>
     <div class="skills-layout"><div class="maps">${sections}</div>${panel}</div>
@@ -815,11 +850,16 @@ function viewBank() {
   const all = [...S.questions.values()];
   const sources = [...new Set(all.map(q => q.source))];
   const by = sec => all.filter(q => q.section === sec).length;
+  const unlabelled = all.filter(q => !q.tests?.length);
+  const testsOf = x => [...new Set(all.filter(q => q.source === x).flatMap(q => q.tests || []))].map(t => TESTS[t]).join(' and ');
   return `<h1 class="title">Question bank</h1>
     <p class="lede">${all.length ? `${plural(all.length, 'question')}: ${by('Reading and Writing')} Reading and Writing, ${by('Math')} Math.` : 'Your bank is empty.'}</p>
+    ${testsInBank().length ? `<p class="fine">${testsInBank().map(t => `${TESTS[t]}: ${plural(all.filter(q => q.tests?.includes(t)).length, 'question')}`).join('. ')}.</p>` : ''}
+    ${unlabelled.length ? `<section class="block"><h2>Which test are these from?</h2><p>${plural(unlabelled.length, 'question')} ${unlabelled.length === 1 ? 'doesn’t' : 'don’t'} say which test ${unlabelled.length === 1 ? 'it’s' : 'they’re'} from, so ${unlabelled.length === 1 ? 'it shows' : 'they show'} up for every test. Add the same PDFs again to label them from the file, or label them all at once:</p>
+      <div class="row">${Object.entries(TESTS).map(([k, l]) => `<button class="btn ghost" data-act="label-test" data-v="${k}">${esc(l)}</button>`).join('')}</div></section>` : ''}
     <button class="drop" data-act="choose"><b>Add questions</b><span>Drop question bank PDFs or JSON question sets here, or click to choose files. A question you already have is updated, not added twice.</span></button>
     <p class="fine">Get PDFs from the <a href="https://satsuiteeducatorquestionbank.collegeboard.org/" target="_blank" rel="noopener">College Board question bank</a>: pick questions, press Export, choose “With correct answers and explanations”, then Download PDF.</p>
-    ${sources.length ? `<section class="block"><h2>Files</h2><div class="list">${sources.map(x => `<div class="li"><div class="li-main"><div class="li-title" title="${esc(x)}">${esc(x)}</div><div class="li-meta">${plural(all.filter(q => q.source === x).length, 'question')}</div></div><div class="li-acts"><button class="link danger" data-act="del-source" data-v="${esc(x)}">Remove</button></div></div>`).join('')}</div></section>` : ''}
+    ${sources.length ? `<section class="block"><h2>Files</h2><div class="list">${sources.map(x => `<div class="li"><div class="li-main"><div class="li-title" title="${esc(x)}">${esc(x)}</div><div class="li-meta">${[plural(all.filter(q => q.source === x).length, 'question'), testsOf(x)].filter(Boolean).join(', ')}</div></div><div class="li-acts"><button class="link danger" data-act="del-source" data-v="${esc(x)}">Remove</button></div></div>`).join('')}</div></section>` : ''}
     <section class="block"><h2>Backup</h2><div class="body">${saveHelp()}</div>${backupControls()}</section>`;
 }
 
@@ -1016,11 +1056,21 @@ const A = {
   'guest-ok': () => { LS.set('mb-guest-ok', '1'); render(); },
 
   // Practice
+  'set-test': d => { S.test = d.v; LS.set('mb-test', d.v || null); S.filter.skills.clear(); S.skillSel = null; resetCounts(); render(); },
+  'label-test': async d => {
+    const qs = [...S.questions.values()].filter(q => !q.tests?.length);
+    if (!await ask(`Mark ${plural(qs.length, 'question')} as ${TESTS[d.v]} questions?`, 'Mark them')) return;
+    for (const [i, q] of qs.entries()) {
+      if (i % 10 === 0) { S.busy = `Labelling question ${i + 1} of ${qs.length}`; render(); }
+      S.questions.set(q.id, await saveQuestion({ ...q, tests: [d.v] }));
+    }
+    S.busy = ''; S.notice = `${plural(qs.length, 'question')} marked as ${TESTS[d.v]}.`; S.noticeErr = false; render();
+  },
   'f-section': d => { S.filter.section = d.v; S.filter.skills.clear(); resetCounts(); render(); },
   'f-diff': d => { toggle(S.filter.diff, d.v); resetCounts(); render(); },
   'f-skill': d => { toggle(S.filter.skills, d.v); resetCounts(); render(); },
   'f-domain'(d) {
-    const f = S.filter, skills = new Set([...S.questions.values()].filter(q => q.domain === d.v && (!f.section || q.section === f.section)).map(q => q.skill));
+    const f = S.filter, skills = new Set(bankQs().filter(q => q.domain === d.v && (!f.section || q.section === f.section)).map(q => q.skill));
     const allOn = [...skills].every(s => f.skills.has(s));
     for (const s of skills) allOn ? f.skills.delete(s) : f.skills.add(s);
     resetCounts(); render();
@@ -1062,19 +1112,19 @@ const A = {
   },
 
   // Mistakes and Skills
-  'retest-due'() { const rs = reviewState(); const qs = [...S.questions.values()].filter(q => rs.get(q.id)?.status === 'due'); studySet(shuffle(qs), `Review, ${shortDate(Date.now())}`, Object.fromEntries(qs.map(q => [q.id, 'review']))); },
+  'retest-due'() { const rs = reviewState(); const qs = bankQs().filter(q => rs.get(q.id)?.status === 'due'); studySet(shuffle(qs), `Review, ${shortDate(Date.now())}`, Object.fromEntries(qs.map(q => [q.id, 'review']))); },
   'practise-one': d => { const q = S.questions.get(d.id); studySet([q], `Review: ${short(q.skill)}`, { [q.id]: 'review' }); },
   'm-filter': d => { S.mistakeFilter = d.v; render(); },
   'show-cleared': () => { S.showCleared = true; render(); },
   'skill-sel': d => { S.skillSel = d.v; render(); if (innerWidth < 980) $('.panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); },
   // Five questions from one skill, new ones first, then ones still missed, then ones already right.
   'study-skill'(d) {
-    const h = history(), qs = [...S.questions.values()].filter(q => q.skill === d.v);
+    const h = history(), qs = bankQs().filter(q => q.skill === d.v);
     const pick = [...shuffle(qs.filter(q => STATUS.unseen(h, q))), ...shuffle(qs.filter(q => STATUS.missed(h, q))), ...shuffle(qs.filter(q => h.get(q.id)?.last === true))].slice(0, 5);
     studySet(pick, `Study: ${short(d.v)}`, Object.fromEntries(pick.map(q => [q.id, STATUS.unseen(h, q) ? 'new' : 'review'])));
   },
   'study-skill-missed'(d) {
-    const rs = reviewState(), qs = [...S.questions.values()].filter(q => q.skill === d.v && rs.get(q.id) && rs.get(q.id).status !== 'cleared');
+    const rs = reviewState(), qs = bankQs().filter(q => q.skill === d.v && rs.get(q.id) && rs.get(q.id).status !== 'cleared');
     studySet(shuffle(qs), `Review: ${short(d.v)}`, Object.fromEntries(qs.map(q => [q.id, 'review'])));
   },
 
@@ -1225,7 +1275,7 @@ async function handleFiles(files) {
         const p = $('#status-text'); if (p) p.textContent = S.busy;
         // A question already in the bank keeps its place and is updated, not duplicated.
         const old = S.questions.get(q.id);
-        if (old) { q.addedAt = old.addedAt; q.seq = old.seq; } else fresh++;
+        if (old) { q.addedAt = old.addedAt; q.seq = old.seq; q.tests = [...new Set([...(old.tests || []), ...(q.tests || [])])]; } else fresh++;
         S.questions.set(q.id, await saveQuestion(q));
       }
       // A JSON set becomes a study module straight away, in the set's own order (once, even if imported again).
@@ -1409,6 +1459,7 @@ async function importJsonSet(file) {
     const sec = nos(x.section || '').toLowerCase().includes('math') ? 'Math' : 'Reading and Writing';
     return {
       id: `${setId}-${x.id ?? i}`.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 64), kind: 'text', source: info.title || file.name,
+      tests: [testOf(x.test || info.test)].filter(Boolean),
       section: sec, domain: canon(x.domain || ''), skill: canon(x.skill || ''), difficulty: x.difficulty ? canon(x.difficulty) : '',
       type: mc ? 'mc' : 'spr', correct: x.answer == null ? null : String(x.answer),
       accepted: mc ? [] : (x.accepted_answers || [x.answer]).map(String).filter(t => !isNaN(parseNum(t))),
@@ -1919,6 +1970,7 @@ async function migrateBrowserStore() {
   }
   if (!S.offline) {
     startAccounts();   // may switch to the signed-in account's space
+    S.test = LS.get('mb-test') || '';
     if (backend === 'browser') st = await readSpace();
     applyState(st);
     loadJournal();
